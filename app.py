@@ -41,8 +41,9 @@ try:
     else:
         # --- 지표 계산 섹션 ---
         
-        # 1. 이동평균선 (MA5, MA20)
+        # 1. 이동평균선 (MA5, MA10, MA20)
         df['MA5'] = df['Close'].rolling(window=5).mean()
+        df['MA10'] = df['Close'].rolling(window=10).mean()
         df['MA20'] = df['Close'].rolling(window=20).mean()
         
         # 2. 볼린저 밴드 (20일, 승수 2)
@@ -91,6 +92,7 @@ try:
             
             # 이동평균선
             fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='blue', width=2), name='MA5'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], line=dict(color='yellow', width=2, dash='dot'), name='MA10'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=2), name='MA20'), row=1, col=1)
 
             # RSI
@@ -104,6 +106,7 @@ try:
             # --- 매매 타점 로직 ---
             last_close = float(df['Close'].iloc[-1])
             last_ma5 = float(df['MA5'].iloc[-1])
+            last_ma10 = float(df['MA10'].iloc[-1])
             last_ma20 = float(df['MA20'].iloc[-1])
             last_rsi = float(df['RSI'].iloc[-1])
             last_bb_upper = float(df['BB_Upper'].iloc[-1])
@@ -113,11 +116,23 @@ try:
             buy_signal = (last_close > last_ma5) and (last_ma5 > last_ma20) and (last_rsi < 70)
             sell_signal = (last_ma5 < last_ma20) or (last_rsi >= 70)
             
-            # 타점 계산
-            buy_price_1 = last_close
-            buy_price_2 = last_ma20
-            buy_price_3 = last_bb_lower
+            # 3가지 시나리오별 매수 타점 계산
+            # S1. 일반형 (추세 추종 - Trend)
+            s1_price_1 = last_close  # 현재가 (정찰병)
+            s1_price_2 = last_ma5  # 5일 이동평균선 (불타기/단기 지지)
+            s1_price_3 = last_ma10  # 10일 이동평균선 (눌림목)
             
+            # S2. 공격형 (모멘텀 - Momentum)
+            s2_price_1 = last_close  # 현재가 (즉시 진입)
+            s2_price_2 = last_bb_upper  # 볼린저 밴드 상단 (돌파 매매 가정)
+            s2_price_3 = last_close * 1.03  # 현재가 + 3% (추가 상승 시 불타기)
+            
+            # S3. 보수형 (역추세 - Value)
+            s3_price_1 = last_ma20  # 20일 이동평균선 (생명선 지지)
+            s3_price_2 = last_ma20 * 0.95  # 20일선 * 0.95 (5% 하락 시 투매 잡기)
+            s3_price_3 = last_bb_lower  # 볼린저 밴드 하단 (과매도)
+            
+            # 공통 매도 타점
             sell_price_1 = last_bb_upper
             sell_price_2 = last_bb_upper * 1.03
             sell_price_3 = last_bb_upper * 1.05
@@ -146,44 +161,142 @@ try:
 
             st.write("---")
             
-            # 타점 UI
+            # 3가지 시나리오별 매수 타점 UI
             st.markdown("""
             <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                         padding: 25px; border-radius: 15px; margin: 20px 0; color: white; text-align: center;'>
-                <h2 style='margin:0; color:white;'>🎯 AI 추천 매매 타점</h2>
+                <h2 style='margin:0; color:white;'>🎯 3-Scenario AI 매수 전략</h2>
             </div>
             """, unsafe_allow_html=True)
             
-            c_buy, c_sell = st.columns(2)
+            # 3개 카드를 나란히 배치
+            col_s1, col_s2, col_s3 = st.columns(3)
             
-            with c_buy:
+            # S1. 일반형 (파란색 계열) 🌊
+            with col_s1:
                 st.markdown(f"""
-                <div style='background-color:#e8f5e9; padding:20px; border-radius:10px; border:2px solid #4caf50;'>
-                    <h3 style='color:#2e7d32; text-align:center; margin-top:0;'>💰 매수 타점</h3>
-                    <div style='background:white; padding:10px; margin:10px 0; border-radius:5px;'>
-                        <strong>1차 (시장가):</strong> <span style='float:right; color:#d32f2f; font-weight:bold;'>{buy_price_1:,.0f}원</span>
+                <div style='background: linear-gradient(135deg, #2196F3 0%, #1976D2 100%); 
+                            padding: 20px; border-radius: 15px; border: 3px solid #1565C0; 
+                            box-shadow: 0 4px 8px rgba(0,0,0,0.2); height: 100%;'>
+                    <h3 style='color: white; text-align: center; margin-top: 0; font-size: 1.3em;'>
+                        🌊 일반형
+                    </h3>
+                    <p style='color: #E3F2FD; text-align: center; font-size: 0.85em; margin: 10px 0 20px 0;'>
+                        추세 추종 전략
+                    </p>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 1 (정찰병)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #1976D2;'>{s1_price_1:,.0f}원</div>
                     </div>
-                    <div style='background:white; padding:10px; margin:10px 0; border-radius:5px;'>
-                        <strong>2차 (눌림목):</strong> <span style='float:right; color:#d32f2f; font-weight:bold;'>{buy_price_2:,.0f}원</span>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 2 (5일선)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #1976D2;'>{s1_price_2:,.0f}원</div>
                     </div>
-                    <div style='background:white; padding:10px; margin:10px 0; border-radius:5px;'>
-                        <strong>3차 (지지선):</strong> <span style='float:right; color:#d32f2f; font-weight:bold;'>{buy_price_3:,.0f}원</span>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 3 (10일선)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #1976D2;'>{s1_price_3:,.0f}원</div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-            with c_sell:
+            # S2. 공격형 (빨간색 계열) 🔥
+            with col_s2:
                 st.markdown(f"""
-                <div style='background-color:#ffebee; padding:20px; border-radius:10px; border:2px solid #ef5350;'>
-                    <h3 style='color:#c62828; text-align:center; margin-top:0;'>💸 매도 타점</h3>
-                    <div style='background:white; padding:10px; margin:10px 0; border-radius:5px;'>
-                        <strong>1차 (저항선):</strong> <span style='float:right; color:#1976d2; font-weight:bold;'>{sell_price_1:,.0f}원</span>
+                <div style='background: linear-gradient(135deg, #F44336 0%, #D32F2F 100%); 
+                            padding: 20px; border-radius: 15px; border: 3px solid #C62828; 
+                            box-shadow: 0 6px 12px rgba(244, 67, 54, 0.4); height: 100%; transform: scale(1.05);'>
+                    <h3 style='color: white; text-align: center; margin-top: 0; font-size: 1.3em;'>
+                        🔥 공격형
+                    </h3>
+                    <p style='color: #FFEBEE; text-align: center; font-size: 0.85em; margin: 10px 0 20px 0;'>
+                        모멘텀 전략
+                    </p>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 1 (즉시 진입)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #D32F2F;'>{s2_price_1:,.0f}원</div>
                     </div>
-                    <div style='background:white; padding:10px; margin:10px 0; border-radius:5px;'>
-                        <strong>2차 (돌파):</strong> <span style='float:right; color:#1976d2; font-weight:bold;'>{sell_price_2:,.0f}원</span>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 2 (BB 상단)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #D32F2F;'>{s2_price_2:,.0f}원</div>
                     </div>
-                    <div style='background:white; padding:10px; margin:10px 0; border-radius:5px;'>
-                        <strong>3차 (슈팅):</strong> <span style='float:right; color:#1976d2; font-weight:bold;'>{sell_price_3:,.0f}원</span>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 3 (+3%)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #D32F2F;'>{s2_price_3:,.0f}원</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # S3. 보수형 (초록색 계열) 🛡️
+            with col_s3:
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, #4CAF50 0%, #388E3C 100%); 
+                            padding: 20px; border-radius: 15px; border: 3px solid #2E7D32; 
+                            box-shadow: 0 4px 8px rgba(0,0,0,0.2); height: 100%;'>
+                    <h3 style='color: white; text-align: center; margin-top: 0; font-size: 1.3em;'>
+                        🛡️ 보수형
+                    </h3>
+                    <p style='color: #E8F5E9; text-align: center; font-size: 0.85em; margin: 10px 0 20px 0;'>
+                        역추세 전략
+                    </p>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 1 (20일선)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #2E7D32;'>{s3_price_1:,.0f}원</div>
+                    </div>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 2 (-5%)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #2E7D32;'>{s3_price_2:,.0f}원</div>
+                    </div>
+                    <div style='background: rgba(255,255,255,0.95); padding: 12px; margin: 10px 0; border-radius: 8px; text-align: center;'>
+                        <div style='font-size: 0.85em; color: #666; margin-bottom: 5px;'>타점 3 (BB 하단)</div>
+                        <div style='font-size: 1.5em; font-weight: bold; color: #2E7D32;'>{s3_price_3:,.0f}원</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.write("---")
+            
+            # 공통 매도/저항 라인 섹션
+            st.markdown("""
+            <div style='background: linear-gradient(135deg, #9E9E9E 0%, #616161 100%); 
+                        padding: 20px; border-radius: 15px; margin: 20px 0; color: white; text-align: center;'>
+                <h3 style='margin:0; color:white;'>📊 공통 매도/저항 라인</h3>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            col_sell1, col_sell2, col_sell3 = st.columns(3)
+            
+            with col_sell1:
+                st.markdown(f"""
+                <div style='background-color: #FFEBEE; padding: 15px; border-radius: 10px; border: 2px solid #EF5350; text-align: center;'>
+                    <div style='font-size: 0.9em; color: #C62828; margin-bottom: 8px; font-weight: bold;'>1차 저항선</div>
+                    <div style='font-size: 1.4em; font-weight: bold; color: #D32F2F;'>BB 상단</div>
+                    <div style='font-size: 1.6em; font-weight: bold; color: #1976D2; margin-top: 10px;'>{sell_price_1:,.0f}원</div>
+                    <div style='font-size: 0.8em; color: #666; margin-top: 5px;'>
+                        ({((sell_price_1 - last_close) / last_close * 100):+.1f}%)
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_sell2:
+                st.markdown(f"""
+                <div style='background-color: #FFEBEE; padding: 15px; border-radius: 10px; border: 2px solid #EF5350; text-align: center;'>
+                    <div style='font-size: 0.9em; color: #C62828; margin-bottom: 8px; font-weight: bold;'>2차 돌파 시세</div>
+                    <div style='font-size: 1.4em; font-weight: bold; color: #D32F2F;'>+3% 돌파</div>
+                    <div style='font-size: 1.6em; font-weight: bold; color: #1976D2; margin-top: 10px;'>{sell_price_2:,.0f}원</div>
+                    <div style='font-size: 0.8em; color: #666; margin-top: 5px;'>
+                        ({((sell_price_2 - last_close) / last_close * 100):+.1f}%)
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_sell3:
+                st.markdown(f"""
+                <div style='background-color: #FFEBEE; padding: 15px; border-radius: 10px; border: 2px solid #EF5350; text-align: center;'>
+                    <div style='font-size: 0.9em; color: #C62828; margin-bottom: 8px; font-weight: bold;'>3차 슈팅 구간</div>
+                    <div style='font-size: 1.4em; font-weight: bold; color: #D32F2F;'>+5% 슈팅</div>
+                    <div style='font-size: 1.6em; font-weight: bold; color: #1976D2; margin-top: 10px;'>{sell_price_3:,.0f}원</div>
+                    <div style='font-size: 0.8em; color: #666; margin-top: 5px;'>
+                        ({((sell_price_3 - last_close) / last_close * 100):+.1f}%)
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
