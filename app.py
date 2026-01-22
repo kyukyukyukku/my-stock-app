@@ -111,11 +111,8 @@ def get_stock_data(ticker, days):
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # ---------------------------------------------------------
-        # [수정됨] 4. Fast MFI (기간 10일)
-        # ---------------------------------------------------------
-        mfi_period = 10 # 기존 14일 -> 10일로 단축 (민감도 Up)
-        
+        # 4. Fast MFI (기간 10일)
+        mfi_period = 10
         typical_price = (df['High'] + df['Low'] + df['Close']) / 3
         money_flow = typical_price * df['Volume']
         
@@ -200,9 +197,8 @@ else:
     vol_breakout_target = round_price_if_korean(df['Vol_Breakout_Price'].iloc[-1], ticker)
     last_mfi = df['MFI'].iloc[-1]
     
-    # 공격형 진입가 (현재가)
+    # 공격형 진입가
     val_atk_entry = round_price_if_korean(last_close, ticker)
-    # 공격형 슈팅가 (3%)
     val_atk_target = round_price_if_korean(last_close * 1.03, ticker)
 
     # 탭 구성
@@ -256,51 +252,101 @@ else:
         currency_text = "원화" if is_korean_stock(ticker) else "달러"
 
         # -------------------------------------------------------------
-        # 퀀트 & 스마트머니 전략 카드 (설명 상세화)
+        # 🤖 AI 퀀트 & 스마트머니 전략 (색상 카드 적용 - 오류 수정됨)
         # -------------------------------------------------------------
         st.subheader(f"🤖 AI 퀀트 & 스마트머니 전략 ({currency_text})")
         
         q1, q2, q3 = st.columns(3)
         
-        # 1. 변동성 돌파
+        # 1. 변동성 돌파 (보라색 테마: Purple)
         with q1:
-            st.markdown("**⚡ 변동성 돌파 (단타)**") 
+            target_str = format_price(vol_breakout_target, ticker)
             
             if last_close >= df['Vol_Breakout_Price'].iloc[-1]:
-                 st.success(f"**🔥 매수 체결 신호!**\n\n현재가가 목표가를 돌파했습니다.\nTarget: {format_price(vol_breakout_target, ticker)}")
+                # 성공 상태 HTML
+                html_content = f"""
+                <div style="background-color: #f3e5f5; padding: 15px; border-radius: 10px; border: 1px solid #ce93d8;">
+                    <h5 style="color: #4a148c; margin: 0 0 10px 0; font-size: 1rem;">⚡ 변동성 돌파 (단타)</h5>
+                    <div style="font-weight: bold; color: #4a148c; margin-bottom: 5px;">🔥 매수 체결 신호!</div>
+                    <div style="font-size: 14px; color: #4a148c;">현재가가 목표가를 돌파했습니다.</div>
+                    <div style="font-size: 14px; color: #4a148c; margin-top: 5px;">Target: {target_str}</div>
+                </div>
+                """
             else:
-                 st.info(f"**⏳ 매수 대기 중**\n\n오늘 이 가격 넘으면 진입하세요.\nTarget: {format_price(vol_breakout_target, ticker)}")
-        
-        # 2. 스마트머니 (MFI) - [수정됨] 고감도 설정 (75/25) 및 중립 세분화
+                # 대기 상태 HTML
+                html_content = f"""
+                <div style="background-color: #f3e5f5; padding: 15px; border-radius: 10px; border: 1px solid #ce93d8;">
+                    <h5 style="color: #4a148c; margin: 0 0 10px 0; font-size: 1rem;">⚡ 변동성 돌파 (단타)</h5>
+                    <div style="font-weight: bold; color: #5e35b1; margin-bottom: 5px;">⏳ 매수 대기 중</div>
+                    <div style="font-size: 14px; color: #5e35b1;">오늘 이 가격 넘으면 진입하세요.</div>
+                    <div style="font-size: 14px; color: #5e35b1; margin-top: 5px;">Target: {target_str}</div>
+                </div>
+                """
+            st.markdown(html_content, unsafe_allow_html=True)
+
+        # 2. 스마트머니 MFI (청록색 테마: Teal)
         with q2:
-            st.markdown(f"**🌊 스마트머니 (Fast MFI 10일)**") 
-            
             mfi_val = f"{last_mfi:.1f}" if not np.isnan(last_mfi) else "데이터 부족"
             
             if np.isnan(last_mfi):
-                st.warning("**⚠️ 계산 불가**\n\n거래량 데이터가 없거나 부족합니다.")
-            elif last_mfi >= 75: # 기준 80->75 완화
-                st.error(f"**⚠️ 과열권 (매도 우위)**\n\n단기 고점일 수 있습니다.\nMFI: {mfi_val}")
-            elif last_mfi <= 25: # 기준 20->25 완화
-                st.success(f"**💎 침체권 (매집 찬스)**\n\n단기 저점일 수 있습니다.\nMFI: {mfi_val}")
-            elif last_mfi >= 50: # 중립 상단
-                st.write(f"**↗️ 매수세 유입 중**\n\n자금이 들어오고 있습니다.\nMFI: {mfi_val}")
-            else: # 중립 하단
-                st.write(f"**↘️ 매도세 우위**\n\n자금이 빠져나가고 있습니다.\nMFI: {mfi_val}")
+                status_title = "⚠️ 계산 불가"
+                status_desc = "거래량 데이터가 부족합니다."
+                text_color = "#004d40"
+            elif last_mfi >= 75:
+                status_title = "⚠️ 과열권 (매도 우위)"
+                status_desc = "단기 고점, 세력 차익실현 주의"
+                text_color = "#b71c1c"
+            elif last_mfi <= 25:
+                status_title = "💎 침체권 (매집 찬스)"
+                status_desc = "단기 저점, 세력 매집 구간"
+                text_color = "#004d40"
+            elif last_mfi >= 50:
+                status_title = "↗️ 매수세 유입 중"
+                status_desc = "자금이 꾸준히 들어오는 중"
+                text_color = "#006064"
+            else:
+                status_title = "↘️ 매도세 우위"
+                status_desc = "자금이 빠져나가는 중"
+                text_color = "#006064"
 
-        # 3. 추세 판단
+            # MFI HTML 생성
+            html_content_mfi = f"""
+            <div style="background-color: #e0f2f1; padding: 15px; border-radius: 10px; border: 1px solid #80cbc4;">
+                <h5 style="color: #004d40; margin: 0 0 10px 0; font-size: 1rem;">🌊 스마트머니 (Fast MFI)</h5>
+                <div style="font-weight: bold; color: {text_color}; margin-bottom: 5px;">{status_title}</div>
+                <div style="font-size: 14px; color: #004d40;">{status_desc}</div>
+                <div style="font-size: 14px; color: #004d40; margin-top: 5px;">MFI Score: {mfi_val}</div>
+            </div>
+            """
+            st.markdown(html_content_mfi, unsafe_allow_html=True)
+
+        # 3. 추세 판단 (오렌지 테마: Orange)
         with q3:
-            st.markdown("**🛡️ 추세 판단 (MA+MFI)**") 
-            
             is_uptrend = df['Close'].iloc[-1] > df['MA20'].iloc[-1]
             has_momentum = last_mfi > 40 if not np.isnan(last_mfi) else False
             
             if is_uptrend and has_momentum:
-                 st.success(f"**📈 상승 추세 (Strong)**\n\n추세가 살아있습니다.\n홀딩 추천")
+                trend_title = "📈 상승 추세 (Strong)"
+                trend_desc = "추세와 수급이 모두 좋습니다. 홀딩!"
+                trend_color = "#e65100"
             elif not is_uptrend:
-                 st.warning(f"**📉 하락 추세 (Weak)**\n\n리스크 관리가 필요합니다.")
+                trend_title = "📉 하락 추세 (Weak)"
+                trend_desc = "리스크 관리가 필요한 구간입니다."
+                trend_color = "#bf360c"
             else:
-                 st.info(f"**🐢 방향성 탐색 중**\n\n주가가 20일선 위에 있지만 상승 힘(거래량)이 부족합니다.")
+                trend_title = "🐢 방향성 탐색 중"
+                trend_desc = "상승 힘(거래량)이 아직 부족합니다."
+                trend_color = "#f57f17"
+
+            # 추세 HTML 생성
+            html_content_trend = f"""
+            <div style="background-color: #fff3e0; padding: 15px; border-radius: 10px; border: 1px solid #ffcc80;">
+                <h5 style="color: #e65100; margin: 0 0 10px 0; font-size: 1rem;">🛡️ 추세 판단 (MA+MFI)</h5>
+                <div style="font-weight: bold; color: {trend_color}; margin-bottom: 5px;">{trend_title}</div>
+                <div style="font-size: 14px; color: #e65100;">{trend_desc}</div>
+            </div>
+            """
+            st.markdown(html_content_trend, unsafe_allow_html=True)
 
         st.markdown("---")
         
