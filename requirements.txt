@@ -1,6 +1,7 @@
 streamlit
 yfinance
 Finance-DataReader
+fredapi
 pandas
 numpy
 plotly
