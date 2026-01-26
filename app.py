@@ -198,7 +198,10 @@ if memos:
 # 메인 화면: 글로벌 증시 & 매크로
 # ==========================================
 if analysis_mode == "🌏 글로벌 증시 & 매크로":
-    st.title("🌏 글로벌 주요 증시 & 매크로 지표")
+    # [수정] 현재 시간 가져오기
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # [수정] st.title 대신 st.markdown(###)을 사용하여 크기 줄임 & 날짜 추가
+    st.markdown(f"### 🌏 글로벌 주요 증시 & 매크로 지표 <span style='font-size:14px; color:gray; font-weight:normal'>({now_str})</span>", unsafe_allow_html=True)
     
     # [수정] 일본 국채 티커 변경 (RR -> XX)
     indices = {
@@ -210,8 +213,8 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
         "💵 환율 (USD/KRW)": "USD/KRW",   
         "💴 환율 (JPY/KRW)": "JPY/KRW",   
         "🇺🇸 미 국채 10년물": "^TNX",      
-        "🇰🇷 한국 국채 10년": "KR10YT=RR",  # 기존 유지
-        "🇯🇵 일본 국채 10년": "JP10YT=XX"   # [수정됨] RR -> XX
+        "🇰🇷 한국 국채 10년": "KR10YT=RR",  
+        "🇯🇵 일본 국채 10년": "JP10YT=XX"   
     }
     
     col1, col2, col3 = st.columns(3)
@@ -262,7 +265,10 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
 # 메인 화면: 개별 종목 분석 모드
 # ==========================================
 else:
-    st.title(f"📈 {ticker} 분석")
+    # [수정] 현재 시간 가져오기
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # [수정] st.title 대신 st.markdown(###)을 사용하여 크기 줄임 & 날짜 추가
+    st.markdown(f"### 📈 {ticker} 분석 <span style='font-size:14px; color:gray; font-weight:normal'>({now_str})</span>", unsafe_allow_html=True)
 
     with st.spinner("퀀트 데이터 분석 중..."):
         df = get_stock_data(ticker, days)
