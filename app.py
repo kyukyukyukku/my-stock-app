@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import FinanceDataReader as fdr
+from fredapi import Fred
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -73,23 +74,17 @@ def delete_memo(index):
 def get_stock_data(ticker, days=365):
     try:
         ticker = clean_ticker(ticker)
-        
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days + 100)
         
-        # -----------------------------------------------------------
-        # [핵심] 일본 국채 티커 수정 반영 (RR -> XX)
-        # -----------------------------------------------------------
         if ticker in ['KR10YT=RR', 'JP10YT=XX']:
             try:
                 target_ticker = f"INVESTING:{ticker}"
                 s_str = start_date.strftime('%Y-%m-%d')
                 e_str = end_date.strftime('%Y-%m-%d')
-                
                 data = fdr.DataReader(target_ticker, s_str, e_str)
             except Exception:
                 return pd.DataFrame()
-                
         elif ticker in ['USD/KRW', 'JPY/KRW']:
             try:
                 s_str = start_date.strftime('%Y-%m-%d')
@@ -97,19 +92,14 @@ def get_stock_data(ticker, days=365):
             except:
                 return pd.DataFrame()
         else:
-            # 나머지는 안정적인 Yahoo Finance
             data = yf.download(ticker, start=start_date, end=end_date, progress=False)
             if isinstance(data.columns, pd.MultiIndex): 
                 data.columns = data.columns.get_level_values(0)
 
-        if data.empty: 
-            return pd.DataFrame()
+        if data.empty: return pd.DataFrame()
 
         df = data.copy()
         
-        # ------------------------------------------
-        # 기술적 지표 계산
-        # ------------------------------------------
         df['MA5'] = df['Close'].rolling(5).mean()
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
@@ -125,7 +115,6 @@ def get_stock_data(ticker, days=365):
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # Fast MFI
         mfi_period = 10
         tp = (df['High'] + df['Low'] + df['Close']) / 3
         
@@ -149,9 +138,72 @@ def get_stock_data(ticker, days=365):
         df['Vol_Breakout_Price'] = df['Open'] + (df['Prev_Range'] * k)
         
         return df.iloc[-days:]
-        
     except Exception as e:
         return pd.DataFrame()
+
+# ==========================================
+# [기능 3] 하이일드 스프레드 (FRED API - 강력한 데이터 정제 추가)
+# ==========================================
+@st.cache_data(ttl=21600)
+def get_high_yield_spread():
+    try:
+        fred = Fred(api_key='c7ece8054e786f8553b38e7585ae689a')
+        
+        # 최근 90일 데이터
+        start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+        series = fred.get_series('BAMLH0A0HYM2', observation_start=start_date)
+        
+        if series is None or series.empty:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(series, columns=['Spread'])
+        df.index.name = 'Date'
+        
+        # [핵심 방어 코드] 문자열이 섞여있으면 강제로 숫자로 변환 (에러는 NaN 처리)
+        df['Spread'] = pd.to_numeric(df['Spread'], errors='coerce')
+        
+        # NaN(결측치) 제거
+        df = df.dropna()
+        
+        # 날짜순 정렬
+        df = df.sort_index()
+        
+        return df
+    except Exception as e:
+        print(f"FRED Error: {e}")
+        return pd.DataFrame()
+
+def analyze_market_risk(current_spread, prev_spread_1week_ago):
+    """
+    하이일드 스프레드 위험도 판별 (안전 장치 포함)
+    """
+    # 데이터 유효성 검사 (None, NaN 방지)
+    try:
+        current_spread = float(current_spread)
+        prev_spread_1week_ago = float(prev_spread_1week_ago)
+    except:
+        return "UNKNOWN", "데이터 확인 불가", "#eeeeee"
+
+    if pd.isna(current_spread) or pd.isna(prev_spread_1week_ago):
+        return "UNKNOWN", "데이터 확인 불가", "#eeeeee"
+
+    # 1. 절대 레벨 체크
+    if current_spread > 4.0:
+        return "RISK_ON", "🚨 RISK_ON: <br>경기 침체 공포 확산 중 (주식 비중 축소)", "#ffcdd2"
+        
+    # 2. 변화량 체크
+    change = current_spread - prev_spread_1week_ago
+    
+    if current_spread < 3.0:
+        if change >= 0.2:
+            return "CAUTION", "⚠️ CAUTION: <br>안전 지대 이탈 조짐 (신용 경색 주의)", "#fff9c4"
+        else:
+            return "RISK_OFF", "✅ RISK_OFF: <br>유동성 풍부, 적극 투자 구간", "#c8e6c9"
+    else:
+        if change >= 0.15:
+            return "CAUTION", "⚠️ CAUTION: <br>위험 신호 감지", "#fff9c4"
+        else:
+            return "NEUTRAL", "🐢 NEUTRAL: <br>시장 관망 필요", "#e0f7fa"
 
 # ==========================================
 # 사이드바 UI
@@ -198,7 +250,6 @@ if memos:
 # 메인 화면: 글로벌 증시 & 매크로
 # ==========================================
 if analysis_mode == "🌏 글로벌 증시 & 매크로":
-    # [수정] 서버 시간을 한국 시간(KST)으로 변환
     korea_tz = pytz.timezone('Asia/Seoul')
     now_str = datetime.now(korea_tz).strftime("%Y-%m-%d %H:%M")
     
@@ -207,8 +258,10 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
     indices = {
         "🇰🇷 코스피": "^KS11",
         "🇰🇷 코스닥": "^KQ11",
+        "📉 공포 지수 (VIX)": "^VIX", 
         "🇺🇸 S&P 500": "^GSPC",
         "🇺🇸 나스닥": "^IXIC",
+        "🇺🇸 러셀 2000": "^RUT",      
         "🇯🇵 닛케이": "^N225",
         "💵 환율 (USD/KRW)": "USD/KRW",   
         "💴 환율 (JPY/KRW)": "JPY/KRW",   
@@ -220,6 +273,9 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
     col1, col2, col3 = st.columns(3)
     cols = [col1, col2, col3]
     
+    # -------------------------------------
+    # 1. 상단: 기존 지표 그리드
+    # -------------------------------------
     with st.spinner("글로벌 데이터 수집 중 (Yahoo + Investing.com)..."):
         for i, (name, sym) in enumerate(indices.items()):
             df_idx = get_stock_data(sym, days=60)
@@ -227,7 +283,6 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
             with cols[i % 3]:
                 if not df_idx.empty:
                     last_val = df_idx['Close'].iloc[-1]
-                    
                     if len(df_idx) >= 2:
                         prev_val = df_idx['Close'].iloc[-2]
                         change = last_val - prev_val
@@ -237,17 +292,12 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
 
                     color = "red" if pct_change > 0 else "blue"
                     
-                    # 포맷팅
-                    if "국채" in name: 
-                        val_fmt = "{:.3f}%"
-                    elif "JPY" in name:
-                        val_fmt = "{:,.2f}"
-                    else:
-                        val_fmt = "{:,.2f}"
+                    if "국채" in name: val_fmt = "{:.3f}%"
+                    elif "JPY" in name: val_fmt = "{:,.2f}"
+                    else: val_fmt = "{:,.2f}"
 
                     st.metric(label=name, value=val_fmt.format(last_val), delta=f"{pct_change:.2f}%")
                     
-                    # 미니 차트
                     fig_mini = go.Figure()
                     fig_mini.add_trace(go.Scatter(x=df_idx.index, y=df_idx['Close'], mode='lines', line=dict(color=color, width=2)))
                     fig_mini.update_layout(
@@ -261,11 +311,79 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
                 else:
                     st.warning(f"{name}: 데이터 로딩 실패")
 
+    st.markdown("---")
+
+    # -------------------------------------
+    # 2. 하단: 하이일드 스프레드 (튕김 방지 강화)
+    # -------------------------------------
+    st.subheader("🔥 미국 하이일드 스프레드 (Risk Signal)")
+    
+    # [핵심] 렌더링 전체를 try-except로 보호
+    try:
+        with st.spinner("FRED 데이터 분석 중..."):
+            df_hy = get_high_yield_spread()
+            
+            # 데이터프레임이 비어있지 않고, 행이 1개 이상일 때만 실행
+            if not df_hy.empty and len(df_hy) > 0:
+                # 안전하게 값 추출 (float 변환 재확인)
+                try:
+                    current_spread = float(df_hy['Spread'].iloc[-1])
+                    current_date = df_hy.index[-1].strftime('%Y-%m-%d')
+                    
+                    if len(df_hy) >= 5:
+                        prev_spread = float(df_hy['Spread'].iloc[-5])
+                        prev_date = df_hy.index[-5].strftime('%Y-%m-%d')
+                    else:
+                        prev_spread = current_spread
+                        prev_date = current_date
+                        
+                    # 위험 분석
+                    status_code, msg, bg_color = analyze_market_risk(current_spread, prev_spread)
+                    
+                    c1, c2 = st.columns([1, 2])
+                    
+                    with c1:
+                        st.markdown(f"""
+                        <div style="background-color:{bg_color}; padding:20px; border-radius:10px; border:1px solid #ddd; font-size:1rem; line-height:1.6;">
+                            <div style="font-weight:bold; margin-bottom:10px;">📢 시장 위험도 분석</div>
+                            <div style="font-weight:bold; margin-bottom:15px;">{msg}</div>
+                            <div style="border-top:1px solid #ccc; margin:10px 0;"></div>
+                            <div>현재 ({current_date}): <b>{current_spread:.2f}%</b></div>
+                            <div style="color:#555;">1주전 ({prev_date}): {prev_spread:.2f}%</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                    with c2:
+                        fig_hy = go.Figure()
+                        fig_hy.add_trace(go.Scatter(
+                            x=df_hy.index, y=df_hy['Spread'],
+                            mode='lines', name='Spread',
+                            line=dict(color='#d32f2f', width=2)
+                        ))
+                        
+                        fig_hy.add_hline(y=4.0, line_dash="dot", line_color="gray", annotation_text="위험 기준 (4.0%)")
+                        fig_hy.add_hline(y=3.0, line_dash="dot", line_color="green", annotation_text="안전 기준 (3.0%)")
+                        
+                        fig_hy.update_layout(
+                            title="US High Yield Spread (최근 90일)",
+                            height=350,
+                            margin=dict(l=20, r=20, t=40, b=20),
+                            hovermode="x unified"
+                        )
+                        st.plotly_chart(fig_hy, width="stretch")
+                        
+                except ValueError as ve:
+                    st.error(f"데이터 형식이 올바르지 않습니다: {ve}")
+            else:
+                st.warning("⚠️ 하이일드 스프레드 데이터가 없습니다. (FRED API 응답 지연)")
+                
+    except Exception as e:
+        st.error(f"화면 표시 중 오류가 발생했습니다: {e}")
+
 # ==========================================
 # 메인 화면: 개별 종목 분석 모드
 # ==========================================
 else:
-    # [수정] 서버 시간을 한국 시간(KST)으로 변환
     korea_tz = pytz.timezone('Asia/Seoul')
     now_str = datetime.now(korea_tz).strftime("%Y-%m-%d %H:%M")
     
@@ -279,7 +397,6 @@ else:
     else:
         last_close = float(df['Close'].iloc[-1])
         
-        # 지표 값
         ma5 = round_price_if_korean(df['MA5'].iloc[-1], ticker)
         ma10 = round_price_if_korean(df['MA10'].iloc[-1], ticker)
         ma20 = round_price_if_korean(df['MA20'].iloc[-1], ticker)
@@ -293,13 +410,11 @@ else:
         val_atk_target = round_price_if_korean(last_close * 1.03, ticker)
         val_def_entry = round_price_if_korean(df['MA20'].iloc[-1] * 0.95, ticker)
 
-        # 탭 구성
         t1, t2 = st.tabs(["📊 차트 분석", "📋 최근 데이터"])
 
         with t1:
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.05)
             
-            # 1. 캔들 + 지표
             fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='주가'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='gray', dash='dot'), name='BB상단'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', dash='dot'), name='BB하단'), row=1, col=1)
@@ -307,7 +422,6 @@ else:
             fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], line=dict(color='#FFD700', dash='dot'), name='MA10'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange'), name='MA20'), row=1, col=1)
 
-            # 가로선
             lines = [
                 (ma10, "blue", "solid", "🌊 눌림목"),
                 (bb_up, "red", "solid", "🔥 돌파"),
@@ -321,11 +435,9 @@ else:
                               annotation=dict(x=0.5, xanchor='center'),
                               row=1, col=1)
 
-            # 2. 거래량
             clrs = ['red' if r.Open <= r.Close else 'blue' for i, r in df.iterrows()]
             fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=clrs, name='거래량'), row=2, col=1)
 
-            # 3. RSI
             fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name='RSI'), row=3, col=1)
             fig.add_hline(y=70, line_color='red', row=3, col=1)
             fig.add_hline(y=30, line_color='blue', row=3, col=1)
@@ -336,14 +448,10 @@ else:
             currency = "원화" if is_korean_stock(ticker) else "달러"
             st.markdown("---")
             
-            # -------------------------------------------------------------
-            # 🤖 AI 퀀트 & 스마트머니 전략
-            # -------------------------------------------------------------
             st.subheader(f"🤖 AI 퀀트 & 스마트머니 전략 ({currency})")
             
             q1, q2, q3 = st.columns(3)
             
-            # 1. 변동성 돌파
             with q1:
                 target_str = format_price(vol_target, ticker)
                 if last_close >= df['Vol_Breakout_Price'].iloc[-1]:
@@ -360,7 +468,6 @@ else:
                     <div style="color:#5e35b1;margin-top:5px;">Target: {target_str}</div></div>"""
                 st.markdown(html, unsafe_allow_html=True)
 
-            # 2. MFI (Fast)
             with q2:
                 mfi_val = f"{mfi:.1f}" if not np.isnan(mfi) else "N/A"
                 if np.isnan(mfi):
@@ -381,7 +488,6 @@ else:
                 <div style="color:#004d40;margin-top:5px;">MFI Score: {mfi_val}</div></div>"""
                 st.markdown(html, unsafe_allow_html=True)
 
-            # 3. 추세 판단
             with q3:
                 is_uptrend = last_close > ma20
                 if is_uptrend and mfi > 40:
