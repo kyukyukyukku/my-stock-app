@@ -1,6 +1,6 @@
 streamlit
 yfinance
-FinanceDataReader
+Finance-DataReader
 pandas
 numpy
 plotly
