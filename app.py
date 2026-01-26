@@ -1,12 +1,11 @@
 import streamlit as st
 import yfinance as yf
+import FinanceDataReader as fdr
 import pandas as pd
 import numpy as np
-import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
-from io import StringIO
 import os
 
 # ==========================================
@@ -67,123 +66,101 @@ def delete_memo(index):
     return False
 
 # ==========================================
-# [기능 2] 시장(지수) 수급 크롤링
-# ==========================================
-@st.cache_data(ttl=300)
-def get_market_trend(market="KOSPI"):
-    sosok = "01" if market == "KOSPI" else "02"
-    url = f"https://finance.naver.com/sise/investor_deal_trend_day.naver?bizdate=&sosok={sosok}&page=1"
-    
-    # 네이버 금융 차단 우회 헤더
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://finance.naver.com/',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
-    }
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=5)
-        response.encoding = 'EUC-KR'
-        
-        if response.status_code != 200: return pd.DataFrame()
-        
-        dfs = pd.read_html(StringIO(response.text), attrs={"class": "type_1"})
-        if not dfs: return pd.DataFrame()
-        
-        df = dfs[0].dropna()
-        if '날짜' not in df.columns:
-            df = df.iloc[:, [0, 1, 2, 3]]
-            df.columns = ['날짜', '개인', '외국인', '기관']
-        else:
-            df = df[['날짜', '개인', '외국인', '기관계']]
-            df.columns = ['날짜', '개인', '외국인', '기관']
-
-        df['날짜'] = df['날짜'].astype(str)
-        df = df[df['날짜'].str.match(r'^\d{2}\.\d{2}\.\d{2}$')]
-        df['날짜'] = pd.to_datetime(df['날짜'], format='%y.%m.%d').dt.strftime('%Y-%m-%d')
-        df = df.sort_values('날짜').reset_index(drop=True)
-        return df
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def get_index_price(market="KOSPI"):
-    ticker = "^KS11" if market == "KOSPI" else "^KQ11"
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=60)
-    
-    try:
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        if df.empty: return pd.DataFrame()
-        df = df.reset_index()
-        df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-        return df[['Date', 'Close']]
-    except: return pd.DataFrame()
-
-# ==========================================
-# [기능 3] 개별 종목 데이터 (퀀트 + Fast MFI)
+# [기능 2] 데이터 수집 함수 (INVESTING 접두어 적용)
 # ==========================================
 @st.cache_data(ttl=3600)
-def get_stock_data(ticker, days):
+def get_stock_data(ticker, days=365):
     try:
         ticker = clean_ticker(ticker)
+        
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days + 100)
         
-        data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
-        if data.empty: return pd.DataFrame()
+        # -----------------------------------------------------------
+        # [핵심] 일본 국채 티커 수정 반영 (RR -> XX)
+        # -----------------------------------------------------------
+        if ticker in ['KR10YT=RR', 'JP10YT=XX']:
+            try:
+                # "INVESTING:"을 붙여서 강제로 인베스팅닷컴 우회 경로 사용
+                target_ticker = f"INVESTING:{ticker}"
+                s_str = start_date.strftime('%Y-%m-%d')
+                e_str = end_date.strftime('%Y-%m-%d')
+                
+                data = fdr.DataReader(target_ticker, s_str, e_str)
+            except Exception:
+                return pd.DataFrame()
+                
+        elif ticker in ['USD/KRW', 'JPY/KRW']:
+            try:
+                s_str = start_date.strftime('%Y-%m-%d')
+                data = fdr.DataReader(ticker, s_str)
+            except:
+                return pd.DataFrame()
+        else:
+            # 나머지는 안정적인 Yahoo Finance
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            if isinstance(data.columns, pd.MultiIndex): 
+                data.columns = data.columns.get_level_values(0)
+
+        if data.empty: 
+            return pd.DataFrame()
 
         df = data.copy()
         
-        # 이동평균
+        # ------------------------------------------
+        # 기술적 지표 계산
+        # ------------------------------------------
         df['MA5'] = df['Close'].rolling(5).mean()
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         
-        # 볼린저밴드
         df['BB_Mid'] = df['Close'].rolling(20).mean()
         std = df['Close'].rolling(20).std()
         df['BB_Up'] = df['BB_Mid'] + (std * 2)
         df['BB_Low'] = df['BB_Mid'] - (std * 2)
         
-        # RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # Fast MFI (10일)
+        # Fast MFI
         mfi_period = 10
         tp = (df['High'] + df['Low'] + df['Close']) / 3
-        mf = tp * df['Volume']
-        pos = np.where(tp > tp.shift(1), mf, 0)
-        neg = np.where(tp < tp.shift(1), mf, 0)
         
-        pmf = pd.Series(pos, index=df.index).rolling(mfi_period).sum()
-        nmf = pd.Series(neg, index=df.index).rolling(mfi_period).sum()
-        mr = pmf / nmf.replace(0, np.nan)
-        df['MFI'] = 100 - (100 / (1 + mr))
+        if 'Volume' in df.columns:
+            vol = df['Volume'].replace(0, np.nan).fillna(0)
+            if vol.sum() == 0:
+                 df['MFI'] = 50
+            else:
+                mf = tp * vol
+                pos = np.where(tp > tp.shift(1), mf, 0)
+                neg = np.where(tp < tp.shift(1), mf, 0)
+                pmf = pd.Series(pos, index=df.index).rolling(mfi_period).sum()
+                nmf = pd.Series(neg, index=df.index).rolling(mfi_period).sum()
+                mr = pmf / nmf.replace(0, np.nan)
+                df['MFI'] = 100 - (100 / (1 + mr))
+        else:
+            df['MFI'] = 50
 
-        # 변동성 돌파
         k = 0.5
         df['Prev_Range'] = (df['High'].shift(1) - df['Low'].shift(1))
         df['Vol_Breakout_Price'] = df['Open'] + (df['Prev_Range'] * k)
         
         return df.iloc[-days:]
-    except: return pd.DataFrame()
+        
+    except Exception as e:
+        return pd.DataFrame()
 
 # ==========================================
 # 사이드바 UI
 # ==========================================
 st.sidebar.header("🔍 분석 모드 선택")
-analysis_mode = st.sidebar.radio("모드 선택", ["개별 종목 분석", "시장(지수) 수급 분석"])
+analysis_mode = st.sidebar.radio("모드 선택", ["개별 종목 분석", "🌏 글로벌 증시 & 매크로"])
 
 ticker = ""
 days = 90
-target_market = "KOSPI"
 
 if analysis_mode == "개별 종목 분석":
     raw_ticker = st.sidebar.text_input("티커 입력", value="005930.KS", key="ticker_input")
@@ -196,9 +173,8 @@ if analysis_mode == "개별 종목 분석":
         else:
             st.sidebar.warning(f"🇺🇸 미국/해외 주식 ({ticker})")
 
-elif analysis_mode == "시장(지수) 수급 분석":
-    target_market = st.sidebar.selectbox("시장 선택", ["KOSPI", "KOSDAQ"])
-    st.sidebar.info("💡 네이버 금융 데이터를 기반으로\n지수와 메이저 수급을 비교합니다.")
+elif analysis_mode == "🌏 글로벌 증시 & 매크로":
+    st.sidebar.info("💡 주요 증시, 환율, 금리, 원자재를\n한눈에 확인합니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📝 메모장")
@@ -219,43 +195,68 @@ if memos:
             st.rerun()
 
 # ==========================================
-# 메인 화면: 시장(지수) 분석 모드
+# 메인 화면: 글로벌 증시 & 매크로
 # ==========================================
-if analysis_mode == "시장(지수) 수급 분석":
-    st.title(f"📊 {target_market} 지수 vs 수급 분석")
+if analysis_mode == "🌏 글로벌 증시 & 매크로":
+    st.title("🌏 글로벌 주요 증시 & 매크로 지표")
     
-    with st.spinner("수급 데이터를 가져오는 중..."):
-        df_supply = get_market_trend(target_market)
-        df_price = get_index_price(target_market)
-        
-        if df_supply.empty:
-            st.error("⚠️ 수급 데이터를 가져오지 못했습니다. (네이버 금융 접속 차단)")
-        elif df_price.empty:
-            st.error("⚠️ 지수 데이터를 가져오지 못했습니다.")
-        else:
-            merged = pd.merge(df_supply, df_price, left_on='날짜', right_on='Date', how='inner')
+    # [수정] 일본 국채 티커 변경 (RR -> XX)
+    indices = {
+        "🇰🇷 코스피": "^KS11",
+        "🇰🇷 코스닥": "^KQ11",
+        "🇺🇸 S&P 500": "^GSPC",
+        "🇺🇸 나스닥": "^IXIC",
+        "🇯🇵 닛케이": "^N225",
+        "💵 환율 (USD/KRW)": "USD/KRW",   
+        "💴 환율 (JPY/KRW)": "JPY/KRW",   
+        "🇺🇸 미 국채 10년물": "^TNX",      
+        "🇰🇷 한국 국채 10년": "KR10YT=RR",  # 기존 유지
+        "🇯🇵 일본 국채 10년": "JP10YT=XX"   # [수정됨] RR -> XX
+    }
+    
+    col1, col2, col3 = st.columns(3)
+    cols = [col1, col2, col3]
+    
+    with st.spinner("글로벌 데이터 수집 중 (Yahoo + Investing.com)..."):
+        for i, (name, sym) in enumerate(indices.items()):
+            df_idx = get_stock_data(sym, days=60)
             
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(go.Bar(x=merged['날짜'], y=merged['외국인'], name='외국인', marker_color='red', opacity=0.5), secondary_y=True)
-            fig.add_trace(go.Bar(x=merged['날짜'], y=merged['기관'], name='기관', marker_color='blue', opacity=0.5), secondary_y=True)
-            fig.add_trace(go.Scatter(x=merged['날짜'], y=merged['Close'], name='지수', line=dict(color='black', width=2)), secondary_y=False)
-            
-            fig.update_layout(title=f"{target_market} 흐름과 수급", height=600, hovermode='x unified', barmode='group')
-            st.plotly_chart(fig, use_container_width=True)
-            
-            last_row = merged.iloc[-1]
-            st.subheader("🤖 오늘의 수급 요약")
-            c1, c2 = st.columns(2)
-            with c1:
-                amt = last_row['외국인']
-                status = "매수" if amt > 0 else "매도"
-                st.info(f"**💰 외국인**: {status} ({amt:,.0f}백만)")
-            with c2:
-                amt = last_row['기관']
-                status = "매수" if amt > 0 else "매도"
-                st.info(f"**🏢 기관**: {status} ({amt:,.0f}백만)")
-                
-            st.dataframe(merged[['날짜', 'Close', '개인', '외국인', '기관']].sort_values('날짜', ascending=False), use_container_width=True)
+            with cols[i % 3]:
+                if not df_idx.empty:
+                    last_val = df_idx['Close'].iloc[-1]
+                    
+                    if len(df_idx) >= 2:
+                        prev_val = df_idx['Close'].iloc[-2]
+                        change = last_val - prev_val
+                        pct_change = (change / prev_val) * 100
+                    else:
+                        pct_change = 0.0
+
+                    color = "red" if pct_change > 0 else "blue"
+                    
+                    # 포맷팅
+                    if "국채" in name: 
+                        val_fmt = "{:.3f}%"
+                    elif "JPY" in name:
+                        val_fmt = "{:,.2f}"
+                    else:
+                        val_fmt = "{:,.2f}"
+
+                    st.metric(label=name, value=val_fmt.format(last_val), delta=f"{pct_change:.2f}%")
+                    
+                    # 미니 차트
+                    fig_mini = go.Figure()
+                    fig_mini.add_trace(go.Scatter(x=df_idx.index, y=df_idx['Close'], mode='lines', line=dict(color=color, width=2)))
+                    fig_mini.update_layout(
+                        margin=dict(l=0, r=0, t=0, b=0),
+                        height=100,
+                        xaxis=dict(visible=False),
+                        yaxis=dict(visible=False),
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_mini, width="stretch")
+                else:
+                    st.warning(f"{name}: 데이터 로딩 실패")
 
 # ==========================================
 # 메인 화면: 개별 종목 분석 모드
@@ -271,7 +272,7 @@ else:
     else:
         last_close = float(df['Close'].iloc[-1])
         
-        # 지표 계산
+        # 지표 값
         ma5 = round_price_if_korean(df['MA5'].iloc[-1], ticker)
         ma10 = round_price_if_korean(df['MA10'].iloc[-1], ticker)
         ma20 = round_price_if_korean(df['MA20'].iloc[-1], ticker)
@@ -291,6 +292,7 @@ else:
         with t1:
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.05)
             
+            # 1. 캔들 + 지표
             fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='주가'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='gray', dash='dot'), name='BB상단'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', dash='dot'), name='BB하단'), row=1, col=1)
@@ -298,6 +300,7 @@ else:
             fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], line=dict(color='#FFD700', dash='dot'), name='MA10'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange'), name='MA20'), row=1, col=1)
 
+            # 가로선
             lines = [
                 (ma10, "blue", "solid", "🌊 눌림목"),
                 (bb_up, "red", "solid", "🔥 돌파"),
@@ -305,29 +308,35 @@ else:
                 (ma20, "gray", "dot", "🛑 손절")
             ]
             for val, col, dash, txt in lines:
-                                fig.add_hline(y=val, line_dash=dash, line_color=col, 
+                fig.add_hline(y=val, line_dash=dash, line_color=col, 
                               annotation_text=f"{txt} ({format_price(val, ticker)})",
-                              annotation_position="top", # 선 바로 위에 글씨 얹기
+                              annotation_position="top",
                               annotation=dict(x=0.5, xanchor='center'),
                               row=1, col=1)
 
+            # 2. 거래량
             clrs = ['red' if r.Open <= r.Close else 'blue' for i, r in df.iterrows()]
             fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=clrs, name='거래량'), row=2, col=1)
 
+            # 3. RSI
             fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name='RSI'), row=3, col=1)
             fig.add_hline(y=70, line_color='red', row=3, col=1)
             fig.add_hline(y=30, line_color='blue', row=3, col=1)
 
             fig.update_layout(height=800, xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             currency = "원화" if is_korean_stock(ticker) else "달러"
             st.markdown("---")
+            
+            # -------------------------------------------------------------
+            # 🤖 AI 퀀트 & 스마트머니 전략
+            # -------------------------------------------------------------
             st.subheader(f"🤖 AI 퀀트 & 스마트머니 전략 ({currency})")
             
             q1, q2, q3 = st.columns(3)
             
-            # 1. 변동성 돌파 (원복됨)
+            # 1. 변동성 돌파
             with q1:
                 target_str = format_price(vol_target, ticker)
                 if last_close >= df['Vol_Breakout_Price'].iloc[-1]:
@@ -344,7 +353,7 @@ else:
                     <div style="color:#5e35b1;margin-top:5px;">Target: {target_str}</div></div>"""
                 st.markdown(html, unsafe_allow_html=True)
 
-            # 2. MFI (원복됨)
+            # 2. MFI (Fast)
             with q2:
                 mfi_val = f"{mfi:.1f}" if not np.isnan(mfi) else "N/A"
                 if np.isnan(mfi):
@@ -378,12 +387,10 @@ else:
                 html = f"""<div style="background-color:#fff3e0;padding:15px;border-radius:10px;border:1px solid #ffcc80;">
                 <div style="color:#e65100;margin:0 0 10px 0;font-weight:bold;font-size:1rem;">🛡️ 추세 판단 (MA+MFI)</div>
                 <div style="color:{color};font-weight:bold;">{title}</div>
-                <div style="color:#e65100;font-size:0.9rem;">{desc}</div>
-                <div style="color:#e65100;margin-top:5px;">MFI Score: {mfi_val}</div></div>"""
+                <div style="color:#e65100;font-size:0.9rem;">{desc}</div></div>"""
                 st.markdown(html, unsafe_allow_html=True)
 
             st.markdown("---")
-            # 기존 전략 상세 복구
             st.markdown("#### 🔻 기존 고전 전략 (일반/공격/보수)")
             c1, c2, c3 = st.columns(3)
             with c1: 
@@ -403,4 +410,5 @@ else:
                            f"- 과매도: {format_price(bb_low, ticker)}")
 
         with t2:
-            st.dataframe(df.sort_index(ascending=False), use_container_width=True)
+            st.subheader(f"🗓️ 최근 {days}일 데이터")
+            st.dataframe(df.sort_index(ascending=False), width="stretch")

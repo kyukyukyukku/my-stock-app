@@ -1,6 +1,6 @@
 streamlit
 yfinance
+FinanceDataReader
 pandas
+numpy
 plotly
-pykrx
-setuptools
