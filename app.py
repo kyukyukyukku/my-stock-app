@@ -6,6 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+import pytz
 import os
 
 # ==========================================
@@ -81,7 +82,6 @@ def get_stock_data(ticker, days=365):
         # -----------------------------------------------------------
         if ticker in ['KR10YT=RR', 'JP10YT=XX']:
             try:
-                # "INVESTING:"을 붙여서 강제로 인베스팅닷컴 우회 경로 사용
                 target_ticker = f"INVESTING:{ticker}"
                 s_str = start_date.strftime('%Y-%m-%d')
                 e_str = end_date.strftime('%Y-%m-%d')
@@ -198,12 +198,12 @@ if memos:
 # 메인 화면: 글로벌 증시 & 매크로
 # ==========================================
 if analysis_mode == "🌏 글로벌 증시 & 매크로":
-    # [수정] 현재 시간 가져오기
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    # [수정] st.title 대신 st.markdown(###)을 사용하여 크기 줄임 & 날짜 추가
+    # [수정] 서버 시간을 한국 시간(KST)으로 변환
+    korea_tz = pytz.timezone('Asia/Seoul')
+    now_str = datetime.now(korea_tz).strftime("%Y-%m-%d %H:%M")
+    
     st.markdown(f"### 🌏 글로벌 주요 증시 & 매크로 지표 <span style='font-size:14px; color:gray; font-weight:normal'>({now_str})</span>", unsafe_allow_html=True)
     
-    # [수정] 일본 국채 티커 변경 (RR -> XX)
     indices = {
         "🇰🇷 코스피": "^KS11",
         "🇰🇷 코스닥": "^KQ11",
@@ -265,9 +265,10 @@ if analysis_mode == "🌏 글로벌 증시 & 매크로":
 # 메인 화면: 개별 종목 분석 모드
 # ==========================================
 else:
-    # [수정] 현재 시간 가져오기
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    # [수정] st.title 대신 st.markdown(###)을 사용하여 크기 줄임 & 날짜 추가
+    # [수정] 서버 시간을 한국 시간(KST)으로 변환
+    korea_tz = pytz.timezone('Asia/Seoul')
+    now_str = datetime.now(korea_tz).strftime("%Y-%m-%d %H:%M")
+    
     st.markdown(f"### 📈 {ticker} 분석 <span style='font-size:14px; color:gray; font-weight:normal'>({now_str})</span>", unsafe_allow_html=True)
 
     with st.spinner("퀀트 데이터 분석 중..."):

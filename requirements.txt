@@ -4,3 +4,4 @@ Finance-DataReader
 pandas
 numpy
 plotly
+pytz
