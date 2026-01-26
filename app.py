@@ -2,9 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+from io import StringIO
 import os
 
 # ==========================================
@@ -13,21 +15,16 @@ import os
 st.set_page_config(page_title="내 손안의 주식 앱 (Premium)", layout="wide")
 
 # ==========================================
-# [핵심 기능] 티커 정리 및 한국 주식 판별
+# [공통 함수] 유틸리티
 # ==========================================
 def clean_ticker(ticker):
-    """티커의 공백 제거 및 대문자 변환"""
     if not ticker: return ""
     return ticker.strip().upper()
 
 def is_korean_stock(ticker):
-    """한국 주식인지 판별"""
     t = clean_ticker(ticker)
     return t.endswith('.KS') or t.endswith('.KQ')
 
-# ==========================================
-# [기능 1] 가격 포맷팅 함수
-# ==========================================
 def format_price(price, ticker):
     if pd.isna(price) or price is None: return "-"
     if is_korean_stock(ticker):
@@ -42,7 +39,7 @@ def round_price_if_korean(price, ticker):
     return price
 
 # ==========================================
-# [기능 2] 메모장 관리 함수
+# [기능 1] 메모장
 # ==========================================
 MEMO_FILE = "memos.txt"
 def load_memos():
@@ -70,84 +67,138 @@ def delete_memo(index):
     return False
 
 # ==========================================
-# [기능 3] 데이터 수집 함수 (Fast MFI 적용)
+# [기능 2] 시장(지수) 수급 크롤링
+# ==========================================
+@st.cache_data(ttl=300)
+def get_market_trend(market="KOSPI"):
+    sosok = "01" if market == "KOSPI" else "02"
+    url = f"https://finance.naver.com/sise/investor_deal_trend_day.naver?bizdate=&sosok={sosok}&page=1"
+    
+    # 네이버 금융 차단 우회 헤더
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://finance.naver.com/',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        response.encoding = 'EUC-KR'
+        
+        if response.status_code != 200: return pd.DataFrame()
+        
+        dfs = pd.read_html(StringIO(response.text), attrs={"class": "type_1"})
+        if not dfs: return pd.DataFrame()
+        
+        df = dfs[0].dropna()
+        if '날짜' not in df.columns:
+            df = df.iloc[:, [0, 1, 2, 3]]
+            df.columns = ['날짜', '개인', '외국인', '기관']
+        else:
+            df = df[['날짜', '개인', '외국인', '기관계']]
+            df.columns = ['날짜', '개인', '외국인', '기관']
+
+        df['날짜'] = df['날짜'].astype(str)
+        df = df[df['날짜'].str.match(r'^\d{2}\.\d{2}\.\d{2}$')]
+        df['날짜'] = pd.to_datetime(df['날짜'], format='%y.%m.%d').dt.strftime('%Y-%m-%d')
+        df = df.sort_values('날짜').reset_index(drop=True)
+        return df
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_index_price(market="KOSPI"):
+    ticker = "^KS11" if market == "KOSPI" else "^KQ11"
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=60)
+    
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        if df.empty: return pd.DataFrame()
+        df = df.reset_index()
+        df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
+        return df[['Date', 'Close']]
+    except: return pd.DataFrame()
+
+# ==========================================
+# [기능 3] 개별 종목 데이터 (퀀트 + Fast MFI)
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker, days):
     try:
         ticker = clean_ticker(ticker)
-        
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days + 100)
         
         data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-            
-        if data.empty:
-            return pd.DataFrame()
+        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+        if data.empty: return pd.DataFrame()
 
-        # ------------------------------------------
-        # 기술적 지표 계산
-        # ------------------------------------------
         df = data.copy()
         
-        # 1. 이동평균선
-        df['MA5'] = df['Close'].rolling(window=5).mean()
-        df['MA10'] = df['Close'].rolling(window=10).mean()
-        df['MA20'] = df['Close'].rolling(window=20).mean()
+        # 이동평균
+        df['MA5'] = df['Close'].rolling(5).mean()
+        df['MA10'] = df['Close'].rolling(10).mean()
+        df['MA20'] = df['Close'].rolling(20).mean()
         
-        # 2. 볼린저 밴드
-        df['BB_Mid'] = df['Close'].rolling(window=20).mean()
-        std = df['Close'].rolling(window=20).std()
+        # 볼린저밴드
+        df['BB_Mid'] = df['Close'].rolling(20).mean()
+        std = df['Close'].rolling(20).std()
         df['BB_Up'] = df['BB_Mid'] + (std * 2)
         df['BB_Low'] = df['BB_Mid'] - (std * 2)
         
-        # 3. RSI
+        # RSI
         delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # 4. Fast MFI (기간 10일)
+        # Fast MFI (10일)
         mfi_period = 10
-        typical_price = (df['High'] + df['Low'] + df['Close']) / 3
-        money_flow = typical_price * df['Volume']
+        tp = (df['High'] + df['Low'] + df['Close']) / 3
+        mf = tp * df['Volume']
+        pos = np.where(tp > tp.shift(1), mf, 0)
+        neg = np.where(tp < tp.shift(1), mf, 0)
         
-        pos_flow = np.where(typical_price > typical_price.shift(1), money_flow, 0)
-        neg_flow = np.where(typical_price < typical_price.shift(1), money_flow, 0)
-        
-        pos_mf = pd.Series(pos_flow, index=df.index).rolling(window=mfi_period).sum()
-        neg_mf = pd.Series(neg_flow, index=df.index).rolling(window=mfi_period).sum()
-        
-        mfi_ratio = pos_mf / neg_mf.replace(0, np.nan) 
-        df['MFI'] = 100 - (100 / (1 + mfi_ratio))
+        pmf = pd.Series(pos, index=df.index).rolling(mfi_period).sum()
+        nmf = pd.Series(neg, index=df.index).rolling(mfi_period).sum()
+        mr = pmf / nmf.replace(0, np.nan)
+        df['MFI'] = 100 - (100 / (1 + mr))
 
-        # 5. 변동성 돌파 전략
+        # 변동성 돌파
         k = 0.5
         df['Prev_Range'] = (df['High'].shift(1) - df['Low'].shift(1))
         df['Vol_Breakout_Price'] = df['Open'] + (df['Prev_Range'] * k)
         
         return df.iloc[-days:]
-        
-    except Exception as e:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 # ==========================================
 # 사이드바 UI
 # ==========================================
-st.sidebar.header("🔍 종목 검색")
-raw_ticker = st.sidebar.text_input("티커 입력", value="005930.KS")
-ticker = clean_ticker(raw_ticker)
-days = st.sidebar.slider("차트 조회 기간", 30, 730, 90)
+st.sidebar.header("🔍 분석 모드 선택")
+analysis_mode = st.sidebar.radio("모드 선택", ["개별 종목 분석", "시장(지수) 수급 분석"])
 
-if ticker:
-    if is_korean_stock(ticker):
-        st.sidebar.success(f"🇰🇷 한국 주식 ({ticker})")
-    else:
-        st.sidebar.warning(f"🇺🇸 미국/해외 주식 ({ticker})")
+ticker = ""
+days = 90
+target_market = "KOSPI"
+
+if analysis_mode == "개별 종목 분석":
+    raw_ticker = st.sidebar.text_input("티커 입력", value="005930.KS", key="ticker_input")
+    ticker = clean_ticker(raw_ticker)
+    days = st.sidebar.slider("차트 조회 기간", 30, 730, 90)
+    
+    if ticker:
+        if is_korean_stock(ticker):
+            st.sidebar.success(f"🇰🇷 한국 주식 ({ticker})")
+        else:
+            st.sidebar.warning(f"🇺🇸 미국/해외 주식 ({ticker})")
+
+elif analysis_mode == "시장(지수) 수급 분석":
+    target_market = st.sidebar.selectbox("시장 선택", ["KOSPI", "KOSDAQ"])
+    st.sidebar.info("💡 네이버 금융 데이터를 기반으로\n지수와 메이저 수급을 비교합니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📝 메모장")
@@ -168,205 +219,188 @@ if memos:
             st.rerun()
 
 # ==========================================
-# 메인 화면
+# 메인 화면: 시장(지수) 분석 모드
 # ==========================================
-st.title(f"📈 {ticker} 분석")
+if analysis_mode == "시장(지수) 수급 분석":
+    st.title(f"📊 {target_market} 지수 vs 수급 분석")
+    
+    with st.spinner("수급 데이터를 가져오는 중..."):
+        df_supply = get_market_trend(target_market)
+        df_price = get_index_price(target_market)
+        
+        if df_supply.empty:
+            st.error("⚠️ 수급 데이터를 가져오지 못했습니다. (네이버 금융 접속 차단)")
+        elif df_price.empty:
+            st.error("⚠️ 지수 데이터를 가져오지 못했습니다.")
+        else:
+            merged = pd.merge(df_supply, df_price, left_on='날짜', right_on='Date', how='inner')
+            
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_trace(go.Bar(x=merged['날짜'], y=merged['외국인'], name='외국인', marker_color='red', opacity=0.5), secondary_y=True)
+            fig.add_trace(go.Bar(x=merged['날짜'], y=merged['기관'], name='기관', marker_color='blue', opacity=0.5), secondary_y=True)
+            fig.add_trace(go.Scatter(x=merged['날짜'], y=merged['Close'], name='지수', line=dict(color='black', width=2)), secondary_y=False)
+            
+            fig.update_layout(title=f"{target_market} 흐름과 수급", height=600, hovermode='x unified', barmode='group')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            last_row = merged.iloc[-1]
+            st.subheader("🤖 오늘의 수급 요약")
+            c1, c2 = st.columns(2)
+            with c1:
+                amt = last_row['외국인']
+                status = "매수" if amt > 0 else "매도"
+                st.info(f"**💰 외국인**: {status} ({amt:,.0f}백만)")
+            with c2:
+                amt = last_row['기관']
+                status = "매수" if amt > 0 else "매도"
+                st.info(f"**🏢 기관**: {status} ({amt:,.0f}백만)")
+                
+            st.dataframe(merged[['날짜', 'Close', '개인', '외국인', '기관']].sort_values('날짜', ascending=False), use_container_width=True)
 
-with st.spinner("데이터 분석 중..."):
-    df = get_stock_data(ticker, days)
-
-if df.empty:
-    st.error(f"❌ '{ticker}' 데이터를 가져올 수 없습니다.")
-    st.info(f"시스템 기준 오늘 날짜: {datetime.now().strftime('%Y-%m-%d')}")
+# ==========================================
+# 메인 화면: 개별 종목 분석 모드
+# ==========================================
 else:
-    last_close = float(df['Close'].iloc[-1])
-    
-    # ----------------------------------
-    # 가격 및 지표 계산 (반올림 적용)
-    # ----------------------------------
-    ma5_rounded = round_price_if_korean(df['MA5'].iloc[-1], ticker)
-    ma10_rounded = round_price_if_korean(df['MA10'].iloc[-1], ticker)
-    ma20_rounded = round_price_if_korean(df['MA20'].iloc[-1], ticker)
-    bb_upper_rounded = round_price_if_korean(df['BB_Up'].iloc[-1], ticker)
-    bb_lower_rounded = round_price_if_korean(df['BB_Low'].iloc[-1], ticker)
-    
-    val_def_entry = round_price_if_korean(df['MA20'].iloc[-1] * 0.95, ticker)
-    val_sell_2 = round_price_if_korean(df['BB_Up'].iloc[-1] * 1.05, ticker)
-    
-    # 퀀트 지표 값
-    vol_breakout_target = round_price_if_korean(df['Vol_Breakout_Price'].iloc[-1], ticker)
-    last_mfi = df['MFI'].iloc[-1]
-    
-    # 공격형 진입가
-    val_atk_entry = round_price_if_korean(last_close, ticker)
-    val_atk_target = round_price_if_korean(last_close * 1.03, ticker)
+    st.title(f"📈 {ticker} 분석")
 
-    # 탭 구성
-    tab1, tab2 = st.tabs(["📊 차트 분석", "📋 최근 데이터"])
+    with st.spinner("퀀트 데이터 분석 중..."):
+        df = get_stock_data(ticker, days)
 
-    # ==========================================
-    # Tab 1: 메인 차트
-    # ==========================================
-    with tab1:
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.05,
-                            subplot_titles=("주가 & 전략 타점", "거래량", "RSI"))
+    if df.empty:
+        st.error(f"❌ '{ticker}' 데이터를 찾을 수 없습니다.")
+    else:
+        last_close = float(df['Close'].iloc[-1])
         
-        # 1. 주가 & 밴드
-        fig.add_trace(go.Scatter(x=list(df.index)+list(df.index[::-1]), y=list(df['BB_Up'])+list(df['BB_Low'][::-1]),
-                                 fill='toself', fillcolor='rgba(128,128,128,0.1)', line=dict(width=0), showlegend=False), row=1, col=1)
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='주가'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='blue', width=1), name='MA5'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], line=dict(color='#FFD700', width=1, dash='dot'), name='MA10'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
-
-        # 전략 가로선
-        hlines = [
-            (ma10_rounded, "blue", "solid", 3, "🌊 일반형 눌림목"),
-            (bb_upper_rounded, "red", "solid", 3, "🔥 공격형 돌파"),
-            (val_def_entry, "green", "solid", 3, "🛡️ 보수형 투매"),
-            (val_sell_2, "gold", "dash", 2, "🚀 2차 목표"),
-            (ma20_rounded, "gray", "dot", 2, "🛑 손절선")
-        ]
+        # 지표 계산
+        ma5 = round_price_if_korean(df['MA5'].iloc[-1], ticker)
+        ma10 = round_price_if_korean(df['MA10'].iloc[-1], ticker)
+        ma20 = round_price_if_korean(df['MA20'].iloc[-1], ticker)
+        bb_up = round_price_if_korean(df['BB_Up'].iloc[-1], ticker)
+        bb_low = round_price_if_korean(df['BB_Low'].iloc[-1], ticker)
         
-        for val, col, dash, width, txt in hlines:
-            txt_fmt = f"{txt} ({format_price(val, ticker)})"
-            fig.add_hline(y=val, line_dash=dash, line_color=col, line_width=width,
-                          annotation_text=txt_fmt, 
-                          annotation_position="bottom", 
-                          annotation=dict(x=0.5, xanchor='center'), 
-                          row=1, col=1)
-
-        # 2. 거래량
-        colors = ['red' if r.Open <= r.Close else 'blue' for i, r in df.iterrows()]
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='거래량'), row=2, col=1)
-
-        # 3. RSI
-        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name='RSI'), row=3, col=1)
-        fig.add_hline(y=70, line_color='red', line_dash='dash', row=3, col=1)
-        fig.add_hline(y=30, line_color='blue', line_dash='dash', row=3, col=1)
-
-        fig.update_layout(height=800, xaxis_rangeslider_visible=False, hovermode="x unified")
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("---")
-        currency_text = "원화" if is_korean_stock(ticker) else "달러"
-
-        # -------------------------------------------------------------
-        # 🤖 AI 퀀트 & 스마트머니 전략 (색상 카드 적용 - 오류 수정됨)
-        # -------------------------------------------------------------
-        st.subheader(f"🤖 AI 퀀트 & 스마트머니 전략 ({currency_text})")
+        vol_target = round_price_if_korean(df['Vol_Breakout_Price'].iloc[-1], ticker)
+        mfi = df['MFI'].iloc[-1]
         
-        q1, q2, q3 = st.columns(3)
-        
-        # 1. 변동성 돌파 (보라색 테마: Purple)
-        with q1:
-            target_str = format_price(vol_breakout_target, ticker)
+        val_atk_entry = round_price_if_korean(last_close, ticker)
+        val_atk_target = round_price_if_korean(last_close * 1.03, ticker)
+        val_def_entry = round_price_if_korean(df['MA20'].iloc[-1] * 0.95, ticker)
+
+        # 탭 구성
+        t1, t2 = st.tabs(["📊 차트 분석", "📋 최근 데이터"])
+
+        with t1:
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.05)
             
-            if last_close >= df['Vol_Breakout_Price'].iloc[-1]:
-                # 성공 상태 HTML
-                html_content = f"""
-                <div style="background-color: #f3e5f5; padding: 15px; border-radius: 10px; border: 1px solid #ce93d8;">
-                    <h5 style="color: #4a148c; margin: 0 0 10px 0; font-size: 1rem;">⚡ 변동성 돌파 (단타)</h5>
-                    <div style="font-weight: bold; color: #4a148c; margin-bottom: 5px;">🔥 매수 체결 신호!</div>
-                    <div style="font-size: 14px; color: #4a148c;">현재가가 목표가를 돌파했습니다.</div>
-                    <div style="font-size: 14px; color: #4a148c; margin-top: 5px;">Target: {target_str}</div>
-                </div>
-                """
-            else:
-                # 대기 상태 HTML
-                html_content = f"""
-                <div style="background-color: #f3e5f5; padding: 15px; border-radius: 10px; border: 1px solid #ce93d8;">
-                    <h5 style="color: #4a148c; margin: 0 0 10px 0; font-size: 1rem;">⚡ 변동성 돌파 (단타)</h5>
-                    <div style="font-weight: bold; color: #5e35b1; margin-bottom: 5px;">⏳ 매수 대기 중</div>
-                    <div style="font-size: 14px; color: #5e35b1;">오늘 이 가격 넘으면 진입하세요.</div>
-                    <div style="font-size: 14px; color: #5e35b1; margin-top: 5px;">Target: {target_str}</div>
-                </div>
-                """
-            st.markdown(html_content, unsafe_allow_html=True)
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='주가'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Up'], line=dict(color='gray', dash='dot'), name='BB상단'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', dash='dot'), name='BB하단'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='blue'), name='MA5'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], line=dict(color='#FFD700', dash='dot'), name='MA10'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange'), name='MA20'), row=1, col=1)
 
-        # 2. 스마트머니 MFI (청록색 테마: Teal)
-        with q2:
-            mfi_val = f"{last_mfi:.1f}" if not np.isnan(last_mfi) else "데이터 부족"
+            lines = [
+                (ma10, "blue", "solid", "🌊 눌림목"),
+                (bb_up, "red", "solid", "🔥 돌파"),
+                (val_def_entry, "green", "solid", "🛡️ 투매"),
+                (ma20, "gray", "dot", "🛑 손절")
+            ]
+            for val, col, dash, txt in lines:
+                                fig.add_hline(y=val, line_dash=dash, line_color=col, 
+                              annotation_text=f"{txt} ({format_price(val, ticker)})",
+                              annotation_position="top", # 선 바로 위에 글씨 얹기
+                              annotation=dict(x=0.5, xanchor='center'),
+                              row=1, col=1)
+
+            clrs = ['red' if r.Open <= r.Close else 'blue' for i, r in df.iterrows()]
+            fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=clrs, name='거래량'), row=2, col=1)
+
+            fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name='RSI'), row=3, col=1)
+            fig.add_hline(y=70, line_color='red', row=3, col=1)
+            fig.add_hline(y=30, line_color='blue', row=3, col=1)
+
+            fig.update_layout(height=800, xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+            currency = "원화" if is_korean_stock(ticker) else "달러"
+            st.markdown("---")
+            st.subheader(f"🤖 AI 퀀트 & 스마트머니 전략 ({currency})")
             
-            if np.isnan(last_mfi):
-                status_title = "⚠️ 계산 불가"
-                status_desc = "거래량 데이터가 부족합니다."
-                text_color = "#004d40"
-            elif last_mfi >= 75:
-                status_title = "⚠️ 과열권 (매도 우위)"
-                status_desc = "단기 고점, 세력 차익실현 주의"
-                text_color = "#b71c1c"
-            elif last_mfi <= 25:
-                status_title = "💎 침체권 (매집 찬스)"
-                status_desc = "단기 저점, 세력 매집 구간"
-                text_color = "#004d40"
-            elif last_mfi >= 50:
-                status_title = "↗️ 매수세 유입 중"
-                status_desc = "자금이 꾸준히 들어오는 중"
-                text_color = "#006064"
-            else:
-                status_title = "↘️ 매도세 우위"
-                status_desc = "자금이 빠져나가는 중"
-                text_color = "#006064"
-
-            # MFI HTML 생성
-            html_content_mfi = f"""
-            <div style="background-color: #e0f2f1; padding: 15px; border-radius: 10px; border: 1px solid #80cbc4;">
-                <h5 style="color: #004d40; margin: 0 0 10px 0; font-size: 1rem;">🌊 스마트머니 (Fast MFI)</h5>
-                <div style="font-weight: bold; color: {text_color}; margin-bottom: 5px;">{status_title}</div>
-                <div style="font-size: 14px; color: #004d40;">{status_desc}</div>
-                <div style="font-size: 14px; color: #004d40; margin-top: 5px;">MFI Score: {mfi_val}</div>
-            </div>
-            """
-            st.markdown(html_content_mfi, unsafe_allow_html=True)
-
-        # 3. 추세 판단 (오렌지 테마: Orange)
-        with q3:
-            is_uptrend = df['Close'].iloc[-1] > df['MA20'].iloc[-1]
-            has_momentum = last_mfi > 40 if not np.isnan(last_mfi) else False
+            q1, q2, q3 = st.columns(3)
             
-            if is_uptrend and has_momentum:
-                trend_title = "📈 상승 추세 (Strong)"
-                trend_desc = "추세와 수급이 모두 좋습니다. 홀딩!"
-                trend_color = "#e65100"
-            elif not is_uptrend:
-                trend_title = "📉 하락 추세 (Weak)"
-                trend_desc = "리스크 관리가 필요한 구간입니다."
-                trend_color = "#bf360c"
-            else:
-                trend_title = "🐢 방향성 탐색 중"
-                trend_desc = "상승 힘(거래량)이 아직 부족합니다."
-                trend_color = "#f57f17"
+            # 1. 변동성 돌파 (원복됨)
+            with q1:
+                target_str = format_price(vol_target, ticker)
+                if last_close >= df['Vol_Breakout_Price'].iloc[-1]:
+                    html = f"""<div style="background-color:#f3e5f5;padding:15px;border-radius:10px;border:1px solid #ce93d8;">
+                    <div style="color:#4a148c;margin:0 0 10px 0;font-weight:bold;font-size:1rem;">⚡ 변동성 돌파 (단타)</div>
+                    <div style="color:#4a148c;font-weight:bold;">🔥 매수 체결 신호!</div>
+                    <div style="color:#4a148c;font-size:0.9rem;">현재가가 목표가를 돌파했습니다.</div>
+                    <div style="color:#4a148c;margin-top:5px;">Target: {target_str}</div></div>"""
+                else:
+                    html = f"""<div style="background-color:#f3e5f5;padding:15px;border-radius:10px;border:1px solid #ce93d8;">
+                    <div style="color:#4a148c;margin:0 0 10px 0;font-weight:bold;font-size:1rem;">⚡ 변동성 돌파 (단타)</div>
+                    <div style="color:#5e35b1;font-weight:bold;">⏳ 매수 대기 중</div>
+                    <div style="color:#5e35b1;font-size:0.9rem;">오늘 이 가격 넘으면 진입하세요.</div>
+                    <div style="color:#5e35b1;margin-top:5px;">Target: {target_str}</div></div>"""
+                st.markdown(html, unsafe_allow_html=True)
 
-            # 추세 HTML 생성
-            html_content_trend = f"""
-            <div style="background-color: #fff3e0; padding: 15px; border-radius: 10px; border: 1px solid #ffcc80;">
-                <h5 style="color: #e65100; margin: 0 0 10px 0; font-size: 1rem;">🛡️ 추세 판단 (MA+MFI)</h5>
-                <div style="font-weight: bold; color: {trend_color}; margin-bottom: 5px;">{trend_title}</div>
-                <div style="font-size: 14px; color: #e65100;">{trend_desc}</div>
-            </div>
-            """
-            st.markdown(html_content_trend, unsafe_allow_html=True)
+            # 2. MFI (원복됨)
+            with q2:
+                mfi_val = f"{mfi:.1f}" if not np.isnan(mfi) else "N/A"
+                if np.isnan(mfi):
+                    title, desc, color = "⚠️ 계산 불가", "데이터 부족", "#004d40"
+                elif mfi >= 75:
+                    title, desc, color = "⚠️ 과열권 (매도 우위)", "차익실현 주의", "#b71c1c"
+                elif mfi <= 25:
+                    title, desc, color = "💎 침체권 (매집 찬스)", "세력 매집 구간", "#004d40"
+                elif mfi >= 50:
+                    title, desc, color = "↗️ 매수세 유입 중", "자금이 꾸준히 들어오는 중", "#006064"
+                else:
+                    title, desc, color = "↘️ 매도세 우위", "자금이 빠져나가는 중", "#006064"
+                
+                html = f"""<div style="background-color:#e0f2f1;padding:15px;border-radius:10px;border:1px solid #80cbc4;">
+                <div style="color:#004d40;margin:0 0 10px 0;font-weight:bold;font-size:1rem;">🌊 스마트머니 (Fast MFI)</div>
+                <div style="color:{color};font-weight:bold;">{title}</div>
+                <div style="color:#004d40;font-size:0.9rem;">{desc}</div>
+                <div style="color:#004d40;margin-top:5px;">MFI Score: {mfi_val}</div></div>"""
+                st.markdown(html, unsafe_allow_html=True)
 
-        st.markdown("---")
-        
-        # -------------------------------------------------------------
-        # 기존 3-Scenario 전략
-        # -------------------------------------------------------------
-        st.markdown("#### 🔻 기존 고전 전략 (일반/공격/보수)") 
-        
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.info(f"**🌊 일반형**\n\n1. 정찰: {format_price(last_close, ticker)}\n2. 불타기: {format_price(ma5_rounded, ticker)}\n3. 눌림목: {format_price(ma10_rounded, ticker)}")
-        with c2:
-            st.error(f"**🔥 공격형**\n\n1. 즉시: {format_price(val_atk_entry, ticker)}\n2. 돌파: {format_price(bb_upper_rounded, ticker)}\n3. 슈팅: {format_price(val_atk_target, ticker)}")
-        with c3:
-            st.success(f"**🛡️ 보수형**\n\n1. 생명선: {format_price(ma20_rounded, ticker)}\n2. 투매: {format_price(val_def_entry, ticker)}\n3. 과매도: {format_price(bb_lower_rounded, ticker)}")
+            # 3. 추세 판단
+            with q3:
+                is_uptrend = last_close > ma20
+                if is_uptrend and mfi > 40:
+                    title, desc, color = "📈 상승 추세 (Strong)", "추세와 수급이 모두 좋습니다. 홀딩!", "#e65100"
+                elif not is_uptrend:
+                    title, desc, color = "📉 하락 추세 (Weak)", "리스크 관리가 필요한 구간입니다.", "#bf360c"
+                else:
+                    title, desc, color = "🐢 방향성 탐색 중", "상승 힘(거래량)이 아직 부족합니다.", "#f57f17"
 
-    # ==========================================
-    # Tab 2: 데이터
-    # ==========================================
-    with tab2:
-        st.subheader(f"🗓️ 최근 {days}일 데이터")
-        fmt = "{:,.0f}" if is_korean_stock(ticker) else "{:,.2f}"
-        st.dataframe(df[['Open','High','Low','Close','Volume', 'MFI']].sort_index(ascending=False), use_container_width=True)
+                html = f"""<div style="background-color:#fff3e0;padding:15px;border-radius:10px;border:1px solid #ffcc80;">
+                <div style="color:#e65100;margin:0 0 10px 0;font-weight:bold;font-size:1rem;">🛡️ 추세 판단 (MA+MFI)</div>
+                <div style="color:{color};font-weight:bold;">{title}</div>
+                <div style="color:#e65100;font-size:0.9rem;">{desc}</div>
+                <div style="color:#e65100;margin-top:5px;">MFI Score: {mfi_val}</div></div>"""
+                st.markdown(html, unsafe_allow_html=True)
+
+            st.markdown("---")
+            # 기존 전략 상세 복구
+            st.markdown("#### 🔻 기존 고전 전략 (일반/공격/보수)")
+            c1, c2, c3 = st.columns(3)
+            with c1: 
+                st.info(f"**🌊 일반형**\n\n"
+                        f"- 정찰: {format_price(last_close, ticker)}\n"
+                        f"- 불타기: {format_price(ma5, ticker)}\n"
+                        f"- 눌림목: {format_price(ma10, ticker)}")
+            with c2: 
+                st.error(f"**🔥 공격형**\n\n"
+                         f"- 즉시: {format_price(val_atk_entry, ticker)}\n"
+                         f"- 돌파: {format_price(bb_up, ticker)}\n"
+                         f"- 슈팅: {format_price(val_atk_target, ticker)}")
+            with c3: 
+                st.success(f"**🛡️ 보수형**\n\n"
+                           f"- 생명선: {format_price(ma20, ticker)}\n"
+                           f"- 투매: {format_price(val_def_entry, ticker)}\n"
+                           f"- 과매도: {format_price(bb_low, ticker)}")
+
+        with t2:
+            st.dataframe(df.sort_index(ascending=False), use_container_width=True)
