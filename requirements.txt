@@ -9,5 +9,5 @@ requests
 fredapi
 pytz
 lxml
-# [중요] KRX 접속 차단 문제를 해결한 최신 개발 버전을 설치합니다.
-git+https://github.com/sharebook-kr/pykrx.git@master
+multipledispatch
+deprecated
