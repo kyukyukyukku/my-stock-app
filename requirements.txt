@@ -1,9 +1,13 @@
 streamlit
 yfinance
+finance-datareader
 pandas
-matplotlib
-pykrx
+numpy
 plotly
+matplotlib
 requests
-# pykrx의 최신 수정사항(KRX 우회)을 반영하기 위해 깃허브 주소로 설치
-git+https://github.com/sharebook-kr/pykrx.git
+fredapi
+pytz
+lxml
+# [중요] KRX 접속 차단 문제를 해결한 최신 개발 버전을 설치합니다.
+git+https://github.com/sharebook-kr/pykrx.git@master
