@@ -1,14 +1,20 @@
 import streamlit as st
 import yfinance as yf
 import FinanceDataReader as fdr
-from fredapi import Fred
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+import requests
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+from fredapi import Fred
+from pykrx import stock
 import pytz
 import os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module='pykrx')
+import streamlit as st
 
 # ==========================================
 # 페이지 설정
@@ -67,54 +73,104 @@ def delete_memo(index):
         except: return False
     return False
 
+@st.cache_data
+def convert_df(df):
+    # 1. 인덱스(날짜)를 일반 컬럼으로 변환 (엑셀에서 보기 편하게)
+    output = df.reset_index()
+    # 2. 한글 깨짐 방지를 위해 'utf-8-sig' 인코딩 사용
+    return output.to_csv(index=False).encode('utf-8-sig')
+
 # ==========================================
-# [기능 2] 데이터 수집 함수 (INVESTING 접두어 적용)
+# [기능 2] 데이터 수집 함수 (pykrx + yfinance 통합 엔진)
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker, days=365):
     try:
         ticker = clean_ticker(ticker)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days + 100)
         
-        if ticker in ['KR10YT=RR', 'JP10YT=XX']:
-            try:
-                target_ticker = f"INVESTING:{ticker}"
-                s_str = start_date.strftime('%Y-%m-%d')
-                e_str = end_date.strftime('%Y-%m-%d')
-                data = fdr.DataReader(target_ticker, s_str, e_str)
-            except Exception:
-                return pd.DataFrame()
+        # 날짜 설정
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=days + 100) # 이동평균선 계산용 여유분
+        
+        start_str_y = start_dt.strftime('%Y-%m-%d')
+        end_str_y = end_dt.strftime('%Y-%m-%d')
+        
+        start_str_k = start_dt.strftime('%Y%m%d')
+        end_str_k = end_dt.strftime('%Y%m%d')
+
+        # -----------------------------------------------------------
+        # 1. 한국 주식 (숫자로 된 6자리 티커) -> pykrx 사용 (데이터 끝판왕)
+        # -----------------------------------------------------------
+        if ticker.isdigit() and len(ticker) == 6:
+            # pykrx로 OHLCV 가져오기
+            df = stock.get_market_ohlcv_by_date(start_str_k, end_str_k, ticker)
+            
+            # 컬럼명을 영문으로 통일 (yfinance 포맷과 맞추기 위해)
+            df = df.rename(columns={
+                '시가': 'Open', '고가': 'High', '저가': 'Low', 
+                '종가': 'Close', '거래량': 'Volume'
+            })
+            df.index.name = 'Date'
+            
+            # pykrx는 가끔 0인 데이터가 올 수 있어 처리
+            df = df[df['Open'] > 0]
+
+        # -----------------------------------------------------------
+        # 2. 한국/일본 국채, 코스피 선물 -> Investing.com (FDR)
+        # -----------------------------------------------------------
+        elif ticker in ['KR10YT=RR', 'JP10YT=XX', 'FKS200']:
+            target_ticker = f"INVESTING:{ticker}"
+            df = fdr.DataReader(target_ticker, start_str_y, end_str_y)
+
+        # -----------------------------------------------------------
+        # 3. 환율 (FDR 사용이 더 안정적)
+        # -----------------------------------------------------------
         elif ticker in ['USD/KRW', 'JPY/KRW']:
-            try:
-                s_str = start_date.strftime('%Y-%m-%d')
-                data = fdr.DataReader(ticker, s_str)
-            except:
-                return pd.DataFrame()
+            df = fdr.DataReader(ticker, start_str_y)
+
+        # -----------------------------------------------------------
+        # 4. 미국 주식 / 지수 / 원자재 -> yfinance
+        # -----------------------------------------------------------
         else:
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            # .KS .KQ가 붙어있으면 떼고 pykrx로 보내는게 좋음 (재귀 호출)
+            if ticker.endswith('.KS') or ticker.endswith('.KQ'):
+                pure_ticker = ticker.split('.')[0]
+                if pure_ticker.isdigit():
+                    # 재귀적으로 자기 자신을 호출하여 pykrx 로직을 타게 함
+                    return get_stock_data(pure_ticker, days)
+            
+            # 진짜 해외 주식/지수
+            data = yf.download(ticker, start=start_str_y, end=end_str_y, progress=False)
             if isinstance(data.columns, pd.MultiIndex): 
                 data.columns = data.columns.get_level_values(0)
+            df = data
 
-        if data.empty: return pd.DataFrame()
+        if df.empty: return pd.DataFrame()
 
-        df = data.copy()
+        # ------------------------------------------
+        # 기술적 지표 계산 (공통 로직)
+        # ------------------------------------------
+        df = df.copy() # 원본 보존
         
+        # 이동평균선
         df['MA5'] = df['Close'].rolling(5).mean()
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         
+        # 볼린저 밴드
         df['BB_Mid'] = df['Close'].rolling(20).mean()
         std = df['Close'].rolling(20).std()
         df['BB_Up'] = df['BB_Mid'] + (std * 2)
         df['BB_Low'] = df['BB_Mid'] - (std * 2)
         
+        # RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
+        # MFI (자금 흐름)
         mfi_period = 10
         tp = (df['High'] + df['Low'] + df['Close']) / 3
         
@@ -133,14 +189,17 @@ def get_stock_data(ticker, days=365):
         else:
             df['MFI'] = 50
 
+        # 변동성 돌파 타겟
         k = 0.5
         df['Prev_Range'] = (df['High'].shift(1) - df['Low'].shift(1))
         df['Vol_Breakout_Price'] = df['Open'] + (df['Prev_Range'] * k)
         
+        # 요청한 기간만큼 자르기
         return df.iloc[-days:]
+        
     except Exception as e:
+        print(f"Data Load Error ({ticker}): {e}")
         return pd.DataFrame()
-
 # ==========================================
 # [기능 3] 하이일드 스프레드 (FRED API - 강력한 데이터 정제 추가)
 # ==========================================
@@ -204,6 +263,64 @@ def analyze_market_risk(current_spread, prev_spread_1week_ago):
             return "CAUTION", "⚠️ CAUTION: <br>위험 신호 감지", "#fff9c4"
         else:
             return "NEUTRAL", "🐢 NEUTRAL: <br>시장 관망 필요", "#e0f7fa"
+
+# ==========================================
+# [기능 4] 투자자별 수급 (최종 완성: 순매수 + 백만원 단위 + 상세항목)
+# ==========================================
+@st.cache_data(ttl=21600)
+def get_investor_trend(ticker, days=30):
+    # 1. 티커 정리
+    if "." in ticker: 
+        ticker = ticker.split(".")[0]
+    
+    # 2. 날짜 설정
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=days)
+    
+    start_str = start_dt.strftime("%Y%m%d")
+    end_str = end_dt.strftime("%Y%m%d")
+    
+    try:
+        # 3. 데이터 조회 (순매수 + 상세 데이터)
+        df = stock.get_market_trading_value_by_date(
+            start_str, 
+            end_str, 
+            ticker, 
+            detail=True,   # 연기금, 사모, 투신 등 상세 항목 모두 가져오기
+            on="순매수"    # 다시 '순매수'로 복귀
+        )
+        
+        if df is None or df.empty:
+            return pd.DataFrame()
+            
+        # 4. [핵심] 단위 변환 (원 -> 백만 원) 및 반올림
+        # 숫자가 너무 길어서 보기 힘들므로 100만으로 나눕니다.
+        df = df.div(1000000).round(0) 
+        
+        # 5. 불필요한 '전체' 컬럼 제거
+        # (순매수 총합은 0에 가까워서 차트 왜곡을 일으킬 수 있음)
+        if '전체' in df.columns:
+            df = df.drop(columns=['전체'])
+
+        # 6. 보기 좋게 컬럼 순서 정렬 (주요 주체 먼저)
+        # 데이터에 있는 컬럼만 선택해서 정렬
+        priority_cols = ['개인', '외국인', '기관합계', '연기금', '투신', '사모', '금융투자', '보험', '은행', '기타금융', '기타법인']
+        # 실제 데이터에 존재하는 컬럼만 남기기 (에러 방지)
+        existing_cols = [c for c in priority_cols if c in df.columns]
+        # 나머지 컬럼들(혹시 있다면) 뒤에 붙이기
+        remaining_cols = [c for c in df.columns if c not in existing_cols]
+        
+        df = df[existing_cols + remaining_cols]
+        
+        # 7. 날짜 인덱스 정리 (최신순)
+        df.index.name = 'Date'
+        df = df.sort_index(ascending=False)
+        
+        return df
+
+    except Exception as e:
+        print(f"Investor Trend Error: {e}") 
+        return pd.DataFrame()
 
 # ==========================================
 # 사이드바 UI
@@ -410,7 +527,7 @@ else:
         val_atk_target = round_price_if_korean(last_close * 1.03, ticker)
         val_def_entry = round_price_if_korean(df['MA20'].iloc[-1] * 0.95, ticker)
 
-        t1, t2 = st.tabs(["📊 차트 분석", "📋 최근 데이터"])
+        t1, t2, t3, t4 = st.tabs(["📊 차트 분석", "📋 가격 데이터", "📋 투자자별 상세(표)", "🏢 수급 차트"])
 
         with t1:
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.05)
@@ -523,5 +640,177 @@ else:
                            f"- 과매도: {format_price(bb_low, ticker)}")
 
         with t2:
-            st.subheader(f"🗓️ 최근 {days}일 데이터")
+            st.subheader(f"📋 최근 {days}일 데이터")
+            
+            # 데이터프레임 표시
             st.dataframe(df.sort_index(ascending=False), width="stretch")
+            
+            # [수정] CSV 다운로드 버튼 기능 강화
+            if not df.empty:
+                csv = convert_df(df.sort_index(ascending=False))
+                
+                # 현재 날짜/시간으로 파일명 생성 (중복 방지)
+                file_name = f"{ticker}_data_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+                
+                st.download_button(
+                    label="📥 CSV 데이터 다운로드",
+                    data=csv,
+                    file_name=file_name,
+                    mime='text/csv',
+                    key='download-csv'
+                )
+        # [NEW] 투자자별 상세 데이터 (표 + 다운로드)
+        with t3:
+            st.subheader("📋 투자자별 매매동향 (최근 90일)")
+            
+            if is_korean_stock(ticker):
+                with st.spinner("KRX 데이터 분석 중..."):
+                    df_investor = get_investor_trend(ticker, days=90)
+                    
+                    if not df_investor.empty:
+                        # 사용자 요청 컬럼 순서대로 정리
+                        target_cols = ['개인', '외국인', '기관합계', '금융투자', '투신', '연기금', '프로그램']
+                        # 실제 데이터에 있는 컬럼만 골라내기 (오류 방지)
+                        valid_cols = [c for c in target_cols if c in df_investor.columns]
+                        
+                        df_table = df_investor[valid_cols].copy()
+                        
+                        # 1. 표 표시
+                        st.dataframe(df_table, width="stretch", height=500)
+                        
+                        # 2. 다운로드 버튼
+                        csv_inv = convert_df(df_table)
+                        file_name_inv = f"{ticker}_investor_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+                        st.download_button(
+                            label="📥 투자자별 데이터 CSV 다운로드",
+                            data=csv_inv,
+                            file_name=file_name_inv,
+                            mime='text/csv',
+                            key='down-investor'
+                        )
+                    else:
+                        st.warning("투자자별 데이터를 가져올 수 없습니다.")
+            else:
+                st.info("🚫 투자자별 수급 데이터는 한국 주식만 지원합니다.")
+
+        # [NEW] 수급 차트 (기존 t3 -> t4 이동)
+        with t4:
+            st.subheader(f"📈 {ticker} 누적 수급 vs 주가 추세 (최근 90일)")
+            
+            if is_korean_stock(ticker):
+                clean_ticker = ticker.split(".")[0]
+                
+                # -----------------------------------------------------------
+                # 1. 수급 데이터 가져오기
+                # -----------------------------------------------------------
+                days = 90
+                df_investor = get_investor_trend(clean_ticker, days=days)
+                
+                if not df_investor.empty:
+                    # 5대 핵심 항목만 추출
+                    target_cols = ['개인', '외국인', '연기금', '금융투자', '투신']
+                    valid_cols = [c for c in target_cols if c in df_investor.columns]
+                    
+                    # 수급 데이터 누적(Cumsum) 계산
+                    df_cumsum = df_investor[valid_cols].sort_index(ascending=True).cumsum()
+                    
+                    # -------------------------------------------------------
+                    # 2. 주가 데이터 가져오기 (안전 모드)
+                    # -------------------------------------------------------
+                    df_price_aligned = pd.DataFrame()
+                    try:
+                        end_dt = datetime.now()
+                        start_dt = end_dt - timedelta(days=days * 1.5)
+                        
+                        s_str = start_dt.strftime("%Y%m%d")
+                        e_str = end_dt.strftime("%Y%m%d")
+                        
+                        df_price = stock.get_market_ohlcv_by_date(s_str, e_str, clean_ticker)
+                        
+                        if not df_price.empty:
+                            df_cumsum.index = pd.to_datetime(df_cumsum.index)
+                            df_price.index = pd.to_datetime(df_price.index)
+                            
+                            common_index = df_cumsum.index.intersection(df_price.index)
+                            df_price_aligned = df_price.loc[common_index, ['종가']]
+                            
+                    except Exception as e:
+                        pass
+
+                    # -------------------------------------------------------
+                    # 3. 그래프 그리기
+                    # -------------------------------------------------------
+                    fig_inv = go.Figure()
+                    
+                    colors = {
+                        '개인': '#A9A9A9', '외국인': '#FF0000', '연기금': '#008000',
+                        '금융투자': '#0000FF', '투신': '#FFA500'
+                    }
+
+                    # [왼쪽 축] 투자자별 누적 순매수
+                    for col in valid_cols:
+                        fig_inv.add_trace(go.Scatter(
+                            x=df_cumsum.index, 
+                            y=df_cumsum[col], 
+                            mode='lines', 
+                            name=col,
+                            yaxis='y1',
+                            line=dict(width=2, color=colors.get(col, 'gray'))
+                        ))
+                    
+                    # [오른쪽 축] 주가
+                    if not df_price_aligned.empty:
+                        fig_inv.add_trace(go.Scatter(
+                            x=df_price_aligned.index,
+                            y=df_price_aligned['종가'],
+                            mode='lines',
+                            name='주가(종가)',
+                            yaxis='y2',
+                            line=dict(width=3, color='black', dash='dot'),
+                            opacity=0.7
+                        ))
+                    
+                    # -------------------------------------------------------
+                    # [수정] 최신 문법으로 레이아웃 설정 (titlefont 제거 -> title dict 사용)
+                    # -------------------------------------------------------
+                    layout_opts = dict(
+                        title=dict(text=f"투자자별 누적 수급 추이 (단위: 백만 원)"),
+                        height=500,
+                        hovermode="x unified",
+                        legend=dict(orientation="h", y=1.02, x=1, xanchor="right"),
+                        
+                        # 왼쪽 Y축 설정 (수급)
+                        yaxis=dict(
+                            title=dict(text="누적 순매수", font=dict(color="#1f77b4")),
+                            tickfont=dict(color="#1f77b4")
+                        ),
+                        xaxis=dict(tickformat="%m-%d")
+                    )
+                    
+                    # 오른쪽 Y축 설정 (주가) - 데이터가 있을 때만
+                    if not df_price_aligned.empty:
+                        layout_opts['yaxis2'] = dict(
+                            title=dict(text="주가 (원)", font=dict(color="black")),
+                            tickfont=dict(color="black"),
+                            overlaying="y",
+                            side="right",
+                            showgrid=False
+                        )
+                    
+                    fig_inv.update_layout(**layout_opts)
+                    fig_inv.add_hline(y=0, line_width=1, line_color="gray", opacity=0.5)
+                    
+                    st.plotly_chart(fig_inv, width="stretch")
+                    
+                    if df_price_aligned.empty:
+                        st.caption("※ 현재 주가 데이터를 불러오지 못해 '수급 차트'만 표시되었습니다.")
+                    else:
+                        st.caption("💡 **Tip:** 검은 점선(주가)과 같이 움직이는 색깔(세력)을 찾으세요.")
+
+                    with st.expander("📄 데이터 상세 보기"):
+                        st.dataframe(df_investor[valid_cols].style.format("{:,.0f}"))
+                
+                else:
+                    st.warning("수급 데이터를 불러오지 못했습니다.")
+            else:
+                st.info("🚫 투자자별 수급 차트는 한국 주식만 지원합니다.")
