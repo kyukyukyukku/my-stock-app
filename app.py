@@ -1,8 +1,59 @@
-import sys
+import streamlit as st
 import os
+import sys
 
-# [강제 설정] 현재 파일(app.py)이 있는 위치를 라이브러리 검색 경로 1순위로 등록
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+# ------------------------------------------------
+# [디버깅] 클라우드 서버 파일 시스템 확인
+# ------------------------------------------------
+st.title("📂 서버 파일 진단 모드")
+
+# 1. 현재 내가 있는 위치 확인
+current_path = os.getcwd()
+st.write(f"📍 현재 위치: `{current_path}`")
+
+# 2. 내 옆에 있는 파일들 다 보여줘
+files = os.listdir(current_path)
+st.write("📂 현재 폴더 파일 목록:", files)
+
+# 3. pykrx 폴더가 진짜 있는지 확인
+if "pykrx" in files:
+    st.success("✅ 'pykrx' 폴더가 발견되었습니다!")
+    
+    # 폴더 안쪽도 확인 (이중 폴더인지 체크)
+    inner_files = os.listdir(os.path.join(current_path, "pykrx"))
+    st.write("📂 pykrx 폴더 내부:", inner_files)
+    
+    if "__init__.py" in inner_files:
+        st.info("ℹ️ __init__.py 파일이 있습니다. (패키지 인식 가능)")
+    else:
+        st.error("❌ __init__.py 파일이 없습니다! 파이썬이 패키지로 인식을 못합니다.")
+        
+    if "stock" in inner_files:
+        st.info("ℹ️ stock 폴더가 있습니다.")
+    else:
+        st.error("❌ stock 폴더가 안 보입니다. 구조가 잘못되었습니다.")
+
+else:
+    st.error("🚨 'pykrx' 폴더가 아예 없습니다! 업로드가 안 됐거나 이름이 다릅니다.")
+    # 혹시 pykrx-master 같은 이름으로 되어있는지 확인
+    for f in files:
+        if "pykrx" in f:
+            st.warning(f"⚠️ 혹시 이 폴더인가요? -> '{f}' (이름을 'pykrx'로 바꿔야 합니다)")
+
+st.divider()
+
+# ------------------------------------------------
+# 기존 코드 실행 시도
+# ------------------------------------------------
+# 경로 강제 추가
+sys.path.insert(0, current_path)
+
+try:
+    from pykrx import stock
+    st.success("🎉 from pykrx import stock 성공! (설치/경로 문제 해결됨)")
+except Exception as e:
+    st.error(f"🔥 import 실패: {e}")
+    st.stop() # 여기서 멈춤
 
 import streamlit as st
 import yfinance as yf
