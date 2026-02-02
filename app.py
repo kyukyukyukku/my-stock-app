@@ -1,3 +1,9 @@
+import sys
+import os
+
+# [강제 설정] 현재 파일(app.py)이 있는 위치를 라이브러리 검색 경로 1순위로 등록
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
 import streamlit as st
 import yfinance as yf
 import FinanceDataReader as fdr
