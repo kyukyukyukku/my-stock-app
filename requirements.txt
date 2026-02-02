@@ -1,6 +1,8 @@
 streamlit
+yfinance
 pandas
 matplotlib
+pykrx
 plotly
 requests
 # pykrx의 최신 수정사항(KRX 우회)을 반영하기 위해 깃허브 주소로 설치
